@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: tests (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS too: the mod runs there, with zsh by default and a symlinked /tmp.
+        os: [ubuntu-latest, macos-latest]
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Mod files parse
+        run: for f in mods/revive/*.js mods/revive/*.mjs mods/revive/lib/*.js; do node --check "$f" || exit 1; done
+      - name: Mod manifest and keys are JSON
+        run: node -e "for (const f of ['mods/revive/mod.json', 'mods/revive/package.json', 'keys.json']) JSON.parse(require('fs').readFileSync(f, 'utf8'))"
+      - name: Test
+        run: npm test
