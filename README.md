@@ -160,9 +160,14 @@ REVIVE_DEBUG=1 zsh               # say why a shell did or didn't resume
     turn automatic resume off for that terminal in the dialog.
   - `/quit` sends no `SessionEnd`. When the daemon stops (its pane closes), it sends one
     for every session it held.
-  - The daemon, not the terminal's Codex process, runs the hooks. A second Codex session
-    that reuses the daemon may not be recorded, or may be recorded on the terminal that
-    started the daemon. This is not verified yet.
+  - The daemon, not the terminal's Codex process, runs the hooks, so they can't tell which
+    terminal a session is in, and a session it runs is not recorded. The dialog still
+    shows the running Codex, without Fork. To have Codex sessions recorded, run Codex
+    without the daemon: `daemon_auto_start = false` under `[features]` in
+    `~/.codex/config.toml`. Codex warns that this can turn off features for other apps that
+    share the daemon.
+  - Codex fires `SessionStart` at a session's first message, so a session is recorded
+    only from then.
 - Shell support: zsh and bash. Other shells can run `revive.mjs check --shell $$` from
   their own rc file and evaluate what it prints.
 

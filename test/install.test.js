@@ -35,6 +35,27 @@ test("Codex groups carry an empty matcher", () => {
   assert.equal(codex.hooks.SessionStart[0].matcher, "");
 });
 
+test("hooks already in place stay where another tool put them", () => {
+  // Another tool appended its group after Revive's: installing again must not
+  // move Revive's back to the end.
+  const installed = withHooks({});
+  installed.hooks.SessionStart.push({ hooks: [theirs] });
+  assert.deepEqual(withHooks(installed), installed);
+});
+
+test("an outdated Revive hook is replaced", () => {
+  const old = withHooks({});
+  old.hooks.SessionEnd[0].hooks[0].timeout = 30;
+  assert.equal(withHooks(old).hooks.SessionEnd[0].hooks[0].timeout, 10);
+  assert.equal(withHooks(old).hooks.SessionEnd.length, 1);
+});
+
+test("Codex's SessionEnd hook gets the 3 second timeout Codex allows", () => {
+  const codex = withHooks({}, { matcher: true, timeouts: { SessionEnd: 3 } });
+  assert.equal(codex.hooks.SessionEnd[0].hooks[0].timeout, 3);
+  assert.equal(codex.hooks.SessionStart[0].hooks[0].timeout, 10);
+});
+
 test("the shell block is added once and removed whole", () => {
   const rc = "export PATH=$HOME/bin:$PATH\nalias ll='ls -l'\n";
   const once = withShellBlock(rc);
@@ -75,6 +96,17 @@ test("install and uninstall touch only what they own, with backups", () => {
   assert.equal(JSON.parse(readFileSync(settings, "utf8")).theme, "dark");
   assert.ok(existsSync(`${settings}.revive-backup`));
   assert.match(run("install"), /Nothing to change/);
+  assert.equal(JSON.parse(readFileSync(join(home, ".codex", "hooks.json"), "utf8")).hooks.SessionEnd[0].hooks[0].timeout, 3);
+
+  // Another tool rewrites the files with sorted keys: the hooks are still
+  // there, so install leaves them alone and says so.
+  const sorted = (v) => (Array.isArray(v) ? v.map(sorted) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sorted(v[k])])) : v);
+  for (const file of [settings, join(home, ".codex", "hooks.json")]) {
+    writeFileSync(file, JSON.stringify(sorted(JSON.parse(readFileSync(file, "utf8")))));
+  }
+  const reformatted = readFileSync(settings, "utf8");
+  assert.match(run("install"), /Nothing to change/);
+  assert.equal(readFileSync(settings, "utf8"), reformatted);
 
   run("uninstall");
   assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")), { theme: "dark", hooks: { Stop: [{ hooks: [theirs] }] } });
