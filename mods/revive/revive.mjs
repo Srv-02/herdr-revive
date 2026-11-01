@@ -17,13 +17,13 @@
 // Hooks never fail an agent: every error is swallowed and the exit code is 0.
 
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, writeFileSync, copyFileSync, mkdirSync, renameSync, realpathSync, statSync, chmodSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync, copyFileSync, mkdirSync, renameSync, realpathSync, rmSync, statSync, chmodSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
-  AGENTS, agentKey, carriedFlags, hookOwner, readRecord, labelArgs, clearArgs, resumedArgs, stateOf, shouldResume,
+  AGENTS, agentKey, agentEnv, carriedFlags, hookOwner, isOneShot, readRecord, labelArgs, clearArgs, resumedArgs, stateOf, shouldResume,
   resumeScript, resumeLine, shQuote, validId,
 } from "./lib/core.js";
 
@@ -134,12 +134,19 @@ async function hook() {
     // previous agent's, sent before this one reported anything.
     const key = agentKey(null, argv) ?? agentFromPayload(payload) ?? agentKey(terminal.status?.app);
     if (!key) return;
+    // `claude -p "…"` or `codex exec` typed in the terminal: it answers and
+    // quits, and its SessionEnd ("other") would leave its session on record in
+    // place of the interactive one. Neither is worth bringing back.
+    if (isOneShot(key, argv)) return;
     const same = rec?.session === payload.session_id;
+    // The hook runs in the agent's environment: where it keeps its sessions.
+    const env = agentEnv(key, process.env);
     await label(t, labelArgs({
       agent: key,
       session: payload.session_id,
       cwd: payload.cwd || terminal.foreground?.cwd || terminal.cwd || "",
       flags: JSON.stringify(carriedFlags(key, argv)),
+      env: Object.keys(env).length ? JSON.stringify(env) : null,
       shell: terminal.pid ?? "",
       since: table.get(terminal.pid)?.since ?? null,
       at: same ? rec.at ?? Date.now() : Date.now(),
@@ -166,17 +173,19 @@ async function hook() {
 
 // ── the shell ───────────────────────────────────────────────────────────────
 
-const claudeDir = () => process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+const claudeDir = (env = process.env) => env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
 
 /**
  * Claude Code writes a session's transcript only once it has a message, so a
  * session opened and left empty can't be resumed: `--resume` says "No
  * conversation found". Its folder is named after the cwd; other folders are
- * searched when the agent moved. Codex is not checked.
+ * searched when the agent moved. Codex is not checked. The folder is the
+ * session's own `CLAUDE_CONFIG_DIR` when it was recorded with one, not this
+ * shell's. Records from before Revive kept it fall back to this shell's.
  */
-function hasTranscript(rec) {
+export function hasTranscript(rec) {
   if (rec.agent !== "claude") return true;
-  const projects = join(claudeDir(), "projects");
+  const projects = join(rec.env?.CLAUDE_CONFIG_DIR ? rec.env.CLAUDE_CONFIG_DIR : claudeDir(), "projects");
   const file = `${rec.session}.jsonl`;
   if (rec.cwd && existsSync(join(projects, rec.cwd.replace(/[^A-Za-z0-9]/g, "-"), file))) return true;
   try { return readdirSync(projects).some((dir) => existsSync(join(projects, dir, file))); }
@@ -414,7 +423,11 @@ function save(path, text) {
     if (!existsSync(backup)) copyFileSync(target, backup);
   }
   const tmp = `${target}.revive-${process.pid}.tmp`;
-  writeFileSync(tmp, text);
+  // Created with the file's own permissions, not the umask's: a 0600 settings
+  // file (API keys under `env`) must not sit world-readable until the chmod.
+  // The chmod stays for bits the umask takes away (0664 under umask 077).
+  rmSync(tmp, { force: true });
+  writeFileSync(tmp, text, mode !== null ? { mode } : undefined);
   if (mode !== null) chmodSync(tmp, mode);
   renameSync(tmp, target);
   return true;

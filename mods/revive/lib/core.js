@@ -9,7 +9,7 @@
 
 export const PREFIX = "revive.";
 // `ended` is no longer written; it stays here so clearing removes it from older records.
-export const KEYS = ["agent", "session", "cwd", "flags", "shell", "since", "at", "ended", "resumed", "failed", "auto"];
+export const KEYS = ["agent", "session", "cwd", "flags", "env", "shell", "since", "at", "ended", "resumed", "failed", "auto"];
 
 /**
  * The agents Revive can bring back. `carry` lists the launch flags a resume or
@@ -18,6 +18,13 @@ export const KEYS = ["agent", "session", "cwd", "flags", "shell", "since", "at",
  * takes a value, 2 for one that takes every value up to the next flag. Anything
  * else on the original command line (a first prompt, `--resume` itself) is
  * left behind.
+ *
+ * `env` lists the variables that say where the agent keeps its sessions: a
+ * session started under `CLAUDE_CONFIG_DIR=~/.claude-work` is found, and
+ * resumed, only under that same folder, so the hook records them with it.
+ * `oneShot` tells a run that answers and quits (`claude -p`, `codex exec`)
+ * from an interactive session, given the words after the program's name:
+ * such a run has hooks too, and must not replace the session on record.
  */
 export const AGENTS = {
   claude: {
@@ -26,6 +33,8 @@ export const AGENTS = {
     apps: ["claude-code", "claude"],
     resume: (id, flags) => ["claude", ...flags, "--resume", id],
     fork: (id, flags) => ["claude", ...flags, "--resume", id, "--fork-session"],
+    env: ["CLAUDE_CONFIG_DIR"],
+    oneShot: (args) => args.some((w) => w === "-p" || w === "--print"),
     carry: {
       "--dangerously-skip-permissions": 0,
       "--allow-dangerously-skip-permissions": 0,
@@ -42,6 +51,8 @@ export const AGENTS = {
     apps: ["codex"],
     resume: (id, flags) => ["codex", "resume", ...flags, id],
     fork: (id, flags) => ["codex", "fork", ...flags, id],
+    env: ["CODEX_HOME"],
+    oneShot: (args) => args[0] === "exec" || args[0] === "e",
     carry: {
       "--no-daemon": 0,
       "--dangerously-bypass-approvals-and-sandbox": 0,
@@ -77,13 +88,30 @@ export function agentKey(app, argv = []) {
   return null;
 }
 
+/** Where the agent's own words start: after its program's name, else after the first word. */
+const argsStart = (key, argv) => {
+  const start = argv.findIndex((word) => base(word) === AGENTS[key].bin);
+  return start < 0 ? 1 : start + 1;
+};
+
+/** Whether a command line runs the agent once, without a session to bring back. */
+export function isOneShot(key, argv = []) {
+  const agent = AGENTS[key];
+  return Boolean(agent?.oneShot?.(argv.slice(argsStart(key, argv)).map(String)));
+}
+
+/** The agent's `env` variables that are set in `env`, as an object (empty when none). */
+export function agentEnv(key, env = {}) {
+  const names = AGENTS[key]?.env ?? [];
+  return Object.fromEntries(names.filter((n) => typeof env[n] === "string" && env[n] !== "").map((n) => [n, env[n]]));
+}
+
 /** The launch flags worth keeping, in their original order. */
 export function carriedFlags(key, argv = []) {
   const carry = AGENTS[key]?.carry;
   if (!carry) return [];
   const out = [];
-  const start = argv.findIndex((word) => base(word) === AGENTS[key].bin);
-  for (let i = start < 0 ? 1 : start + 1; i < argv.length; i++) {
+  for (let i = argsStart(key, argv); i < argv.length; i++) {
     const word = argv[i];
     const eq = word.indexOf("=");
     if (word.startsWith("--") && eq > 0 && own(carry, word.slice(0, eq)) && carry[word.slice(0, eq)] >= 1) { out.push(word); continue; }
@@ -126,11 +154,16 @@ export const validId = (id) => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9
 
 export const shortId = (id) => (id ? String(id).slice(0, 8) : "");
 
-/** The command line that resumes or forks a session. */
+/**
+ * The command line that resumes or forks a session. A session recorded with
+ * its agent's variables (`CLAUDE_CONFIG_DIR`) gets them back through `env`.
+ */
 export function command(rec, kind = "resume") {
   const agent = AGENTS[rec?.agent];
   if (!agent || !validId(rec.session)) return null;
-  return agent[kind](rec.session, rec.flags ?? []);
+  const argv = agent[kind](rec.session, rec.flags ?? []);
+  const vars = Object.entries(agentEnv(rec.agent, rec.env ?? {}));
+  return vars.length ? ["env", ...vars.map(([k, v]) => `${k}=${v}`), ...argv] : argv;
 }
 
 /** One word for a POSIX shell, quoted only when it needs to be. */
@@ -153,11 +186,18 @@ export function readRecord(labels) {
     const parsed = JSON.parse(get("flags") || "[]");
     if (Array.isArray(parsed)) flags = parsed.map(String);
   } catch { /* a hand-edited label: carry nothing */ }
+  let env = {};
+  try {
+    const parsed = JSON.parse(get("env") || "{}");
+    // Only the variables the agent declares: a label must not set LD_PRELOAD.
+    if (parsed && typeof parsed === "object") env = agentEnv(get("agent"), parsed);
+  } catch { /* a hand-edited label: no variables */ }
   return {
     agent: get("agent") || null,
     session,
     cwd: get("cwd") || null,
     flags,
+    env,
     shell: num(get("shell")),
     since: get("since") || null,
     at: num(get("at")),
@@ -222,6 +262,10 @@ export function shouldResume(rec, { pid, since = null, shellPid, env = {} }) {
   if (pid === null || shellPid !== pid) return { go: false, why: "not the terminal's own shell" };
   if (env.REVIVE_AUTO === "0") return { go: false, why: "REVIVE_AUTO=0" };
   if (!rec.auto) return { go: false, why: "turned off for this terminal" };
+  // It was tried after the last restart and the agent gave up at once (its
+  // folder is gone, the session can't be found): trying at every restart would
+  // fail the same way. The dialog still offers it by hand.
+  if (rec.failed) return { go: false, why: "the last resume failed" };
   if (sameShell(rec, { pid, since })) return { go: false, why: "same shell as before" };
   return { go: true, why: "the terminal's program was replaced" };
 }
