@@ -81,11 +81,12 @@ export const AGENTS = {
       "--profile": 1,
     },
   },
-  // Factory Droid, from docs.factory.com/reference/cli-reference and
-  // hooks-reference. Unverified end to end (no droid on the machine it was
-  // written on): `--fork <id>` opening an interactive session, and the OSC
-  // app name it reports (`droid` is a guess). `-r` is left behind on purpose:
-  // it means --resume in interactive mode and --reasoning-effort in `exec`.
+  // Factory Droid, checked against droid 1.1.0: `--resume <id>` reopens the
+  // same session id; `--fork <id>` opens an interactive copy under a new id; it
+  // reports itself to Herdr as `droid`. Only interactive flags are carried:
+  // --skip-permissions-unsafe, -m and the reasoning/tool flags exist only in
+  // `droid exec`, and interactive droid reads them as the prompt. `-r` is left
+  // behind on purpose: it means --resume in interactive mode.
   droid: {
     name: "Droid",
     bin: "droid",
@@ -94,31 +95,24 @@ export const AGENTS = {
     fork: (id, flags) => ["droid", ...flags, "--fork", id],
     end: claudeEnd,
     carry: {
-      "--skip-permissions-unsafe": 0,
       "--auto": 1,
-      "-m": 1,
-      "--model": 1,
-      "--reasoning-effort": 1,
-      "--spec-model": 1,
-      "--spec-reasoning-effort": 1,
       "--settings": 1,
-      "--only-tools": 1,
-      "--add-tools": 1,
-      "--remove-tools": 1,
+      "--use-spec": 0,
       "--disable-builtin-skills": 0,
       "--append-system-prompt": 1,
       "--append-system-prompt-file": 1,
     },
   },
-  // Cursor CLI, from cursor.com/docs/cli/reference/parameters and
-  // cursor.com/docs/agent/hooks. It installs as both `cursor-agent` and
-  // `agent`; `agent` is too generic a name, so it counts only under a path
-  // that says Cursor (the installer's ~/.local/share/cursor-agent/versions/…)
-  // or with a Cursor report. It has no fork. Unverified end to end (no
-  // cursor-agent on the machine it was written on): that the CLI's
-  // `conversation_id` is the chat id `--resume` takes, and which sessionEnd
-  // reasons the CLI sends for /exit, Ctrl+C or a shutdown. `--api-key` and
-  // `-H` are never carried: labels are readable by anything that asks hc.
+  // Cursor CLI, checked against cursor-agent 2026.10.22: the sessionStart
+  // hook's `conversation_id` is the chat id `--resume` takes, and resuming
+  // reopens that same chat. sessionStart fires for a new chat, not when one is
+  // resumed, so the record a resume leaves on the terminal is what carries it
+  // to the next restart. It installs as both `cursor-agent` and `agent`;
+  // `agent` is too generic a name, so it counts only under a path that says
+  // Cursor (~/.local/share/cursor-agent/versions/…) or with a Cursor report.
+  // It has no fork and no `-m` (only --model). Not checked yet: which
+  // sessionEnd reasons it sends for /exit, Ctrl+C or a shutdown. `--api-key`
+  // and `-H` are never carried: labels are readable by anything that asks hc.
   cursor: {
     name: "Cursor",
     bin: "cursor-agent",
@@ -139,7 +133,6 @@ export const AGENTS = {
       "-f": 0,
       "--force": 0,
       "--yolo": 0,
-      "-m": 1,
       "--model": 1,
       "--sandbox": 1,
       "--approve-mcps": 0,

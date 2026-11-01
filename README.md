@@ -29,7 +29,7 @@ experimental: see [Limits](#limits).
   nothing to resume. A shell you start inside a pane never resumes anything.
 - **Same flags.** `--dangerously-skip-permissions`, `--model`, `--permission-mode`,
   `--add-dir` and similar flags come back with the session; for Droid
-  `--skip-permissions-unsafe`, `--auto`, `-m`; for Cursor `--force`/`--yolo`, `--model`,
+  `--auto` (its interactive mode has no `--skip-permissions-unsafe`); for Cursor `--force`/`--yolo`, `--model`,
   `--sandbox`, `--mode`. The first prompt, `--resume` itself and secrets (`--api-key`, `-H`)
   are left behind.
 - **Fork.** Open the conversation of the focused agent as a new session beside it (right,
@@ -143,13 +143,11 @@ REVIVE_DEBUG=1 zsh               # say why a shell did or didn't resume
 - Codex has not been tested end to end. Its hooks follow the same format as Claude Code's,
   and Codex behind a wrapper (npm's `node …/bin/codex`, a launcher script) is recognized,
   but Revive can't check whether a Codex session can be resumed before trying.
-- Droid and the Cursor CLI are built from their documentation and have not been tested
-  end to end. Not verified yet: Droid's `--fork` opening an interactive session and the
-  name it reports to Herdr; that Cursor's CLI fires `sessionStart`/`sessionEnd` hooks with a
-  `conversation_id` that `--resume` takes (third-party reports say it does), which
-  `sessionEnd` reasons it sends for `/exit`, Ctrl+C or a shutdown, and that hooks printing
-  nothing are fine with it; the two session-file layouts above. Like Codex, neither is
-  checked for a resumable session before trying: a failed resume is marked *Resume failed*.
+- Droid (1.1.0) and the Cursor CLI (2026.10.22) were checked by hand: the hooks record the
+  session and flags, and resume (and Droid's fork) reopen the conversation. Not checked
+  yet: which `sessionEnd` reasons Cursor sends for `/exit`, Ctrl+C or a shutdown, and a
+  real reboot with either. Like Codex, neither is checked for a resumable session before
+  trying: a failed resume is marked *Resume failed*.
 - Cursor installs as `cursor-agent` and `agent`. `agent` is a common name, so it counts as
   Cursor only under a path that says so (`…/cursor-agent/…`) or when it reports itself as
   Cursor to Herdr. Cursor's hooks also run for the Cursor editor's chats; outside a Herdr

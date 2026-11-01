@@ -35,13 +35,17 @@ test("`agent` is Cursor only when its path or its report says so", () => {
   assert.equal(agentKey(null, ["/bin/zsh", "-l"]), null);
 });
 
-test("droid carries its permission, autonomy and model flags, nothing else", () => {
+test("droid carries only its interactive flags; exec-only flags read as a prompt", () => {
+  // Interactive droid 1.1.0 takes --auto, --settings, --append-system-prompt(-file),
+  // --use-spec and --disable-builtin-skills. --skip-permissions-unsafe, -m and the
+  // reasoning/tool flags are `droid exec` only: interactive droid reads them as the prompt.
   assert.deepEqual(
-    carriedFlags("droid", ["droid", "--skip-permissions-unsafe", "--auto", "high", "-m", "claude-opus-4", "--resume", "old", "fix the bug"]),
-    ["--skip-permissions-unsafe", "--auto", "high", "-m", "claude-opus-4"],
+    carriedFlags("droid", ["droid", "--auto", "high", "--use-spec", "--resume", "old", "fix the bug"]),
+    ["--auto", "high", "--use-spec"],
   );
-  assert.deepEqual(carriedFlags("droid", ["droid", "--model=gpt-5", "--reasoning-effort", "high", "-r", "x", "task"]), ["--model=gpt-5", "--reasoning-effort", "high"]);
+  assert.deepEqual(carriedFlags("droid", ["droid", "--skip-permissions-unsafe", "-m", "gpt-5", "--reasoning-effort", "high"]), []);
   assert.deepEqual(carriedFlags("droid", ["droid", "--settings", "/s.json", "--cwd", "/elsewhere", "-w", "tree", "--fork", "y"]), ["--settings", "/s.json"]);
+  assert.deepEqual(carriedFlags("droid", ["droid", "--append-system-prompt-file", "/p.md", "--disable-builtin-skills"]), ["--append-system-prompt-file", "/p.md", "--disable-builtin-skills"]);
   assert.deepEqual(carriedFlags("droid", ["droid", "constructor"]), []);
 });
 
@@ -50,7 +54,8 @@ test("cursor carries force, model, sandbox and mode, and never a key or a header
     carriedFlags("cursor", ["cursor-agent", "-f", "--model", "gpt-5", "--sandbox", "disabled", "--resume", "old", "write tests"]),
     ["-f", "--model", "gpt-5", "--sandbox", "disabled"],
   );
-  assert.deepEqual(carriedFlags("cursor", ["agent", "--yolo", "--force", "-m", "sonnet-4", "--approve-mcps", "--plan"]), ["--yolo", "--force", "-m", "sonnet-4", "--approve-mcps", "--plan"]);
+  // cursor-agent 2026.10.22 has --model but no -m.
+  assert.deepEqual(carriedFlags("cursor", ["agent", "--yolo", "--force", "--model", "sonnet-4", "--approve-mcps", "--plan"]), ["--yolo", "--force", "--model", "sonnet-4", "--approve-mcps", "--plan"]);
   assert.deepEqual(carriedFlags("cursor", ["cursor-agent", "--api-key", "sk-secret", "-H", "Authorization: x", "--print", "-p", "hi", "--mode=ask"]), ["--mode=ask"]);
   assert.deepEqual(
     carriedFlags("cursor", ["/x/cursor-agent/versions/1/node", "--use-system-ca", "/x/cursor-agent/versions/1/index.js", "--force", "do it"]),
@@ -65,7 +70,7 @@ test("resume commands are built exactly", () => {
 });
 
 test("droid forks with --fork; Cursor has no fork", () => {
-  assert.deepEqual(command({ agent: "droid", session: ID, flags: ["-m", "x"] }, "fork"), ["droid", "-m", "x", "--fork", ID]);
+  assert.deepEqual(command({ agent: "droid", session: ID, flags: ["--auto", "high"] }, "fork"), ["droid", "--auto", "high", "--fork", ID]);
   assert.equal(command({ agent: "cursor", session: ID, flags: [] }, "fork"), null);
   assert.equal(canFork("claude"), true);
   assert.equal(canFork("codex"), true);

@@ -174,7 +174,7 @@ test("a new session starts without a resumed mark", () => {
 
 // ── Factory Droid and Cursor ────────────────────────────────────────────────
 
-const droid = { bin: "droid", argv: ["droid", "--skip-permissions-unsafe", "-m", "gpt-5", "fix it"] };
+const droid = { bin: "droid", argv: ["droid", "--auto", "high", "fix it"] };
 const cursor = { bin: "cursor-agent", argv: ["cursor-agent", "--force", "--model", "gpt-5", "fix it"] };
 const cursorStart = { hook_event_name: "sessionStart", conversation_id: ID, session_id: ID, generation_id: ID, workspace_roots: ["/w/app"], cursor_version: "2026.10.1", transcript_path: null };
 const cursorEnd = (reason) => ({ hook_event_name: "sessionEnd", conversation_id: ID, session_id: ID, reason, cursor_version: "2026.10.1" });
@@ -185,7 +185,7 @@ test("droid's SessionStart is remembered, with its flags", () => {
   const got = set(calls());
   assert.equal(got["revive.agent"], "droid");
   assert.equal(got["revive.session"], ID);
-  assert.equal(got["revive.flags"], '["--skip-permissions-unsafe","-m","gpt-5"]');
+  assert.equal(got["revive.flags"], '["--auto","high"]');
 });
 
 test("droid's own /exit forgets it, a signal keeps it", () => {

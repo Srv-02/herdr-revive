@@ -98,8 +98,8 @@ One entry each in `AGENTS` (`lib/core.js`), one hook target in `HOOK_TARGETS`
 | --- | --- | --- | --- | --- | --- | --- |
 | Claude Code | `claude`; report `claude-code` | `claude … --resume <id>` | `claude … --resume <id> --fork-session` | `~/.claude/settings.json` | `session_id` | `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, `--permission-mode`, `--model`, `--add-dir`, `--settings`, `--agent` |
 | Codex | `codex`; report `codex` | `codex resume … <id>` | `codex fork … <id>` | `~/.codex/hooks.json`, groups with `"matcher": ""` | `session_id` | `--no-daemon`, `--dangerously-bypass-approvals-and-sandbox`, `--yolo`, `--full-auto`, `--search`, `-m`/`--model`, `-s`/`--sandbox`, `-a`/`--ask-for-approval`, `-p`/`--profile` |
-| Droid | `droid`; report `droid` (a guess) | `droid … --resume <id>` | `droid … --fork <id>` | `~/.factory/hooks.json` (event map, no `hooks` wrapper) if it exists, else `hooks` in `~/.factory/settings.json`; command `… hook --agent droid` | `session_id` | `--skip-permissions-unsafe`, `--auto`, `-m`/`--model`, `--reasoning-effort`, `--spec-model`, `--spec-reasoning-effort`, `--settings`, `--only-tools`, `--add-tools`, `--remove-tools`, `--disable-builtin-skills`, `--append-system-prompt`, `--append-system-prompt-file` |
-| Cursor | `cursor-agent`, or `agent`/`node`/`index.js` under a `cursor` or `cursor-agent` folder; report `cursor`, `cursor-agent` | `cursor-agent … --resume <id>` | none | `~/.cursor/hooks.json`: `{"version": 1, "hooks": {"sessionStart": [{"command": …}], "sessionEnd": […]}}`, no timeout; command `… hook --agent cursor` | `conversation_id`; folder from `workspace_roots[0]` | `-f`/`--force`, `--yolo`, `-m`/`--model`, `--sandbox`, `--approve-mcps`, `--mode`, `--plan`, `--workspace`, `--plugin-dir` |
+| Droid | `droid`; report `droid` | `droid … --resume <id>` | `droid … --fork <id>` | `~/.factory/hooks.json` (event map, no `hooks` wrapper) if it exists, else `hooks` in `~/.factory/settings.json`; command `… hook --agent droid` | `session_id` | `--auto`, `--settings`, `--use-spec`, `--disable-builtin-skills`, `--append-system-prompt`, `--append-system-prompt-file` (interactive flags only: `--skip-permissions-unsafe`, `-m` and the reasoning/tool flags are `droid exec` only, and interactive droid reads them as the prompt) |
+| Cursor | `cursor-agent`, or `agent`/`node`/`index.js` under a `cursor` or `cursor-agent` folder; report `cursor`, `cursor-agent` | `cursor-agent … --resume <id>` | none | `~/.cursor/hooks.json`: `{"version": 1, "hooks": {"sessionStart": [{"command": …}], "sessionEnd": […]}}`, no timeout; command `… hook --agent cursor` | `conversation_id`; folder from `workspace_roots[0]` | `-f`/`--force`, `--yolo`, `--model` (it has no `-m`), `--sandbox`, `--approve-mcps`, `--mode`, `--plan`, `--workspace`, `--plugin-dir` |
 
 A running agent nobody recorded is found from its files: Claude Code by
 `~/.claude/sessions/<pid>.json`; Droid by the newest `<id>.jsonl` in
@@ -107,12 +107,15 @@ A running agent nobody recorded is found from its files: Claude Code by
 Cursor by the newest `<id>/` (folder or its `store.db`) in `~/.cursor/chats/<md5 of the
 cwd>/` written since then. Codex: not found.
 
-Not verified (no droid or cursor-agent where this was built): Droid's report name, that
-`droid --fork <id>` opens an interactive session; that the Cursor CLI fires
-`sessionStart`/`sessionEnd` and that its `conversation_id` is the chat id `--resume` takes
-(third-party logs show `conversation_id` equal to `session_id` there), its `sessionEnd`
-reasons for `/exit`, Ctrl+C and a shutdown (logs show `completed` for a normal end), that
-an empty hook output is fine with it, and both session-file layouts above.
+Checked by hand with droid 1.1.0 and cursor-agent 2026.10.22 on macOS: Droid reports
+`droid` to Herdr; its SessionStart hook records the session and its flags; `droid --auto
+high --resume <id>` reopens the same session id in high autonomy; `droid --fork <id>` opens
+an interactive copy under a new id. Cursor's `sessionStart` fires for a new chat with a
+`conversation_id` that `cursor-agent --force --resume <id>` reopens with its history;
+it does not fire again when a chat is resumed, so the record a resume leaves on the
+terminal carries it to the next restart. Both session-file layouts above match. Not
+checked yet: Cursor's `sessionEnd` reasons for `/exit`, Ctrl+C and a shutdown, and a real
+reboot with either agent.
 
 ## Rules
 
