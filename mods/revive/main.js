@@ -8,16 +8,24 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, run, theme, focused, appHome, props, closeOverlay, notify } from "herdr";
+import { exec, run, theme, focused, appHome, home, props, closeOverlay, notify } from "herdr";
 import { AGENTS, command, shortId, ago, shJoin } from "./lib/core.js";
 
 const ENGINE = () => `${appHome()}/mods/revive/revive.mjs`;
 const REFRESH_MS = 4000;
+const LIST_MAX_H = 360;
+
+/** A folder the way a shell prompt shows it: the home folder as `~`. */
+function tilde(path) {
+  const h = home();
+  if (!path || !h) return path;
+  return path === h ? "~" : path.startsWith(h + "/") ? "~" + path.slice(h.length) : path;
+}
 
 const STATE = {
-  running: { word: "Running", color: (t) => t.working },
-  lost: { word: "Lost to a restart", color: (t) => t.blocked },
-  interrupted: { word: "Interrupted", color: (t) => t.blocked },
+  running: { word: "Running", color: (t) => t.ansi2 },
+  lost: { word: "Lost to a restart", color: (t) => t.ansi3 },
+  interrupted: { word: "Interrupted", color: (t) => t.ansi3 },
   failed: { word: "Resume failed", color: (t) => t.ansi1 },
 };
 const NEEDS_YOU = new Set(["lost", "interrupted", "failed"]);
@@ -46,7 +54,7 @@ function button(t, id, label, onClick, { kind = "outline", hint = null, disabled
     .when(Boolean(hint), (el) => el.child(div().text_size(10.5).text_color(solid ? t.solid_foreground : t.dim).opacity(0.7).child(hint)));
 }
 
-const heading = (t, text) => div().mt(14).mb(6).text_size(10.5).text_color(t.dim).child(text);
+const heading = (t, text) => div().mt(16).mb(8).text_size(10.5).font_medium().text_color(t.dim).child(text);
 
 function badge(t, state) {
   const s = STATE[state];
@@ -185,14 +193,14 @@ export default class Revive extends View {
     const running = state === "running";
     const empty = running && entry.forkable === false;
     const flags = rec.flags?.length ? shJoin(rec.flags) : null;
-    return v_flex().gap(10).p(12).rounded(10).bg(t.raised)
+    return v_flex().gap(12).p(14).rounded(12).bg(t.raised).border_1().border_color(t.border)
       .child(h_flex().gap(8).items_center()
-        .child(div().text_size(13).font_semibold().text_color(t.foreground).child(agent?.name ?? rec.agent))
+        .child(div().text_size(14).font_semibold().text_color(t.foreground).child(agent?.name ?? rec.agent))
         .child(div().text_size(11.5).text_color(t.dim).font_family("JetBrains Mono").child(shortId(rec.session)))
         .child(div().flex_1())
         .child(badge(t, state)))
-      .child(v_flex().gap(2).text_size(11.5).text_color(t.muted)
-        .when(Boolean(rec.cwd), (el) => el.child(div().truncate().child(rec.cwd)))
+      .child(v_flex().gap(4).text_size(12).text_color(t.muted)
+        .when(Boolean(rec.cwd), (el) => el.child(div().truncate().child(tilde(rec.cwd))))
         .when(Boolean(flags), (el) => el.child(div().truncate().text_color(t.dim).font_family("JetBrains Mono").text_size(10.5).child(flags)))
         .when(Boolean(entry.unrecorded), (el) => el.child(div().text_color(t.dim).child("Started before Revive was installed: it can be forked, but won't come back by itself.")))
         .when(empty, (el) => el.child(div().text_color(t.dim).child(NO_MESSAGE))))
@@ -209,11 +217,13 @@ export default class Revive extends View {
     const { rec, state } = entry;
     const agent = AGENTS[rec.agent];
     const needs = NEEDS_YOU.has(state);
-    return h_flex().id(`row-${i}`).h(40).px(8).gap(10).items_center().rounded(8).cursor_pointer().hover((s) => s.bg(t.hover))
+    return h_flex().id(`row-${i}`).h(48).px(12).gap(12).items_center().rounded(10).cursor_pointer()
+      .when(needs, (el) => el.bg(t.raised))
+      .hover((s) => s.bg(t.hover))
       .on_click(() => { this.close(); run("pane.focus", { terminal: entry.address }); })
       .child(v_flex().flex_1().min_w(0)
         .child(h_flex().gap(6).items_center()
-          .child(div().text_size(12.5).text_color(t.foreground).child(agent?.name ?? rec.agent))
+          .child(div().text_size(13).font_medium().text_color(t.foreground).child(agent?.name ?? rec.agent))
           .child(div().text_size(11).text_color(t.dim).font_family("JetBrains Mono").child(shortId(rec.session))))
         .child(div().truncate().text_size(11).text_color(t.dim)
           .child([entry.where ?? entry.address, rec.resumed ? `resumed ${ago(rec.resumed)}` : null].filter(Boolean).join(" · "))))
@@ -228,7 +238,9 @@ export default class Revive extends View {
     if (!s) return div();
     const shellOk = Object.values(s.shell ?? {}).some(Boolean);
     const ok = s.claude && shellOk;
-    const part = (name, on) => div().text_color(on ? t.muted : t.blocked).child(`${on ? "✓" : "✕"} ${name}`);
+    const part = (name, on) => h_flex().gap(4).text_color(on ? t.muted : t.blocked)
+      .child(div().text_color(on ? t.ansi2 : t.blocked).child(on ? "✓" : "✕"))
+      .child(name);
     return h_flex().gap(10).items_center().text_size(11)
       .child(part("Claude Code hooks", s.claude))
       .when(s.codex !== null, (el) => el.child(part("Codex hooks", s.codex)))
@@ -243,17 +255,17 @@ export default class Revive extends View {
     const needs = others.filter((e) => NEEDS_YOU.has(e.state));
     const rest = others.filter((e) => !NEEDS_YOU.has(e.state));
     return v_flex().id("revive").track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
-      .size_full().bg(t.popover).p(18)
+      .size_full().bg(t.popover).px(20).pt(18).pb(16)
       .child(h_flex().items_center().gap(8)
-        .child(div().text_size(15).font_semibold().text_color(t.foreground).child("↻ Revive"))
+        .child(div().text_size(16).font_semibold().text_color(t.foreground).child("↻ Revive"))
         .child(div().text_size(11.5).text_color(t.dim).child("Agent sessions, remembered on their terminals")))
-      .child(div().id("revive-scroll").flex_1().min_h(0).overflow_y_scrollbar()
-        .child(heading(t, "FOCUSED TERMINAL"))
-        .child(this.focusedCard(t))
-        .when(needs.length > 0, (el) => el.child(heading(t, "NEED YOU")).children(needs.map((e, i) => this.row(t, e, `n${i}`))))
-        .when(rest.length > 0, (el) => el.child(heading(t, "OTHER SESSIONS")).children(rest.map((e, i) => this.row(t, e, `r${i}`)))))
+      .child(heading(t, "FOCUSED TERMINAL"))
+      .child(this.focusedCard(t))
+      .when(others.length > 0, (el) => el.child(div().id("revive-scroll").max_h(LIST_MAX_H).overflow_y_scrollbar()
+        .when(needs.length > 0, (el) => el.child(heading(t, "NEED YOU")).child(v_flex().gap(4).children(needs.map((e, i) => this.row(t, e, `n${i}`)))))
+        .when(rest.length > 0, (el) => el.child(heading(t, "OTHER SESSIONS")).child(v_flex().gap(4).children(rest.map((e, i) => this.row(t, e, `r${i}`)))))))
       .when(Boolean(this.note), (el) => el.child(div().mt(8).p(8).rounded(6).bg(t.raised).text_size(11.5)
         .text_color(this.note.level === "error" ? t.ansi1 : t.muted).child(this.note.text)))
-      .child(div().mt(10).pt(10).border_t_1().border_color(t.border).child(this.setupLine(t)));
+      .child(div().mt(16).pt(12).border_t_1().border_color(t.border).child(this.setupLine(t)));
   }
 }
