@@ -71,6 +71,7 @@ A session is remembered as labels on its herdr-core terminal:
 | `revive.session` | The session id |
 | `revive.cwd` | The folder the session ran in |
 | `revive.flags` | The carried launch flags, as a JSON array |
+| `revive.env` | The agent's config folder when the session ran under one (`{"CLAUDE_CONFIG_DIR": …}` or `{"CODEX_HOME": …}`), as a JSON object; absent otherwise |
 | `revive.shell` | The pid of the terminal's program when the session started or was resumed |
 | `revive.since` | That program's start time (`ps -o lstart`), so a new shell that got an old pid after a reboot is still new |
 | `revive.at` | When it was recorded (ms) |
@@ -88,6 +89,13 @@ Labels are kept by herdr-core across its restarts and go away with the terminal.
   wrapper are one agent (npm's `node …/bin/codex` running the native `codex`, a launcher
   with another name). Agent, shell, agent is a tool call: a `claude -p` an agent runs
   inherits `HC_TERMINAL_ID`, but its hooks record nothing.
+- A one-shot run in the foreground (`claude -p`/`--print`, `codex exec`/`e`) records
+  nothing: it fires `SessionStart` and ends with reason `other`, so it would replace the
+  interactive session on record and be resumed after the next restart.
+- The hook records the agent's `CLAUDE_CONFIG_DIR` or `CODEX_HOME` from its own
+  environment. The transcript check looks in that folder, and resume and fork run the
+  agent under it (`env CLAUDE_CONFIG_DIR=… claude …`). Only those two variables are read
+  back from the label.
 - The agent is known by the foreground command line first, then the command line of the
   agent process the hook came from, then the transcript path, and only then the
   terminal's last OSC report, which may still be a previous agent's. A running agent
@@ -106,8 +114,9 @@ Labels are kept by herdr-core across its restarts and go away with the terminal.
 - `check` resumes only when all hold: it runs in the terminal's own shell (`$$` is the
   terminal's pid), the terminal's program is not the remembered one (another pid, or the
   same pid with another start time), automatic resume is on, the agent and the id are
-  valid, and (for Claude Code) the session's transcript exists. Without a transcript the
-  record is dropped.
+  valid, the last resume did not fail (`revive.failed` is unset), and (for Claude Code)
+  the session's transcript exists. Without a transcript the record is dropped. A failed
+  resume is not retried at every restart; **Resume** in the dialog still tries it.
 - `check` marks the terminal (`shell`, `since`, `resumed`) before printing, so a second
   shell can't resume the same session again.
 - The shell block runs what `check` printed at the first prompt (zsh: a one-time `precmd`
@@ -131,7 +140,7 @@ Labels are kept by herdr-core across its restarts and go away with the terminal.
 | `REVIVE_DEBUG=1` | The shell block says why it did or didn't resume, on stderr |
 | `REVIVE_HC` | The `hc` binary the engine and the shell block use (default: `hc` on PATH) |
 | `REVIVE_TTY` | The device the resume runs on, instead of the terminal's (for tests) |
-| `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `ZDOTDIR` | Honored when finding the files to install into; without `ZDOTDIR` in the environment, `zsh -c` is asked for it (it reads `~/.zshenv`) |
+| `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `ZDOTDIR` | Honored when finding the files to install into (a session's own `CLAUDE_CONFIG_DIR`/`CODEX_HOME` is recorded with it); without `ZDOTDIR` in the environment, `zsh -c` is asked for it (it reads `~/.zshenv`) |
 
 Install writes through symlinks to the file they point at, keeps each file's permissions,
 and copies the original to `<file>.revive-backup` only the first time.

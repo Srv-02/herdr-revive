@@ -107,7 +107,7 @@ ln -s "$PWD/herdr-revive/mods/revive" ~/.config/herdr-app/mods/revive
    themes that hold the shell's output while it starts (an instant prompt) don't get in
    the way.
 4. If the agent exits with an error within 15 seconds, the terminal is marked as failed and
-   the dialog offers a retry.
+   the dialog offers a retry. A failed session is not tried again automatically.
 
 ```sh
 hc get t3 --json | jq '.labels | with_entries(select(.key | startswith("revive.")))'
@@ -123,9 +123,20 @@ REVIVE_DEBUG=1 zsh               # say why a shell did or didn't resume
   back by itself.
 - An agent that died while its shell lived on is not resumed automatically, since nothing
   told the shell. Use **Resume** in the dialog.
-- Codex has not been tested end to end. Its hooks follow the same format as Claude Code's,
+- Codex support is experimental. Its hooks follow the same format as Claude Code's,
   and Codex behind a wrapper (npm's `node …/bin/codex`, a launcher script) is recognized,
-  but Revive can't check whether a Codex session can be resumed before trying.
+  but Revive can't check whether a Codex session can be resumed before trying. Codex
+  0.163.0 also runs its sessions in a shared background daemon, which Revive was not
+  built for:
+  - `SessionEnd` always reports reason `other`, so Revive can't tell a session you ended
+    from one a crash or a restart ended. A session you left with `/quit` stays
+    remembered, shows as *Interrupted*, and comes back at the next restart. To stop that,
+    turn automatic resume off for that terminal in the dialog.
+  - `/quit` sends no `SessionEnd`. When the daemon stops (its pane closes), it sends one
+    for every session it held.
+  - The daemon, not the terminal's Codex process, runs the hooks. A second Codex session
+    that reuses the daemon may not be recorded, or may be recorded on the terminal that
+    started the daemon. This is not verified yet.
 - Shell support: zsh and bash. Other shells can run `revive.mjs check --shell $$` from
   their own rc file and evaluate what it prints.
 

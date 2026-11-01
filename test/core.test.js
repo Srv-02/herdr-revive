@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  agentKey, carriedFlags, validId, command, shQuote, shJoin, readRecord, labelArgs, clearArgs,
+  agentKey, agentEnv, carriedFlags, isOneShot, validId, command, shQuote, shJoin, readRecord, labelArgs, clearArgs,
   stateOf, shouldResume, resumeScript, ago,
 } from "../mods/revive/lib/core.js";
 
@@ -83,7 +83,7 @@ test("shell quoting survives the shell", () => {
 test("labels read back as a record", () => {
   // `ended` from older versions is read past.
   const rec = readRecord(labels({ agent: "claude", session: ID, cwd: "/w", flags: '["--model","opus"]', shell: 41, at: 5, ended: "other" }));
-  assert.deepEqual(rec, { agent: "claude", session: ID, cwd: "/w", flags: ["--model", "opus"], shell: 41, since: null, at: 5, resumed: null, failed: null, auto: true });
+  assert.deepEqual(rec, { agent: "claude", session: ID, cwd: "/w", flags: ["--model", "opus"], env: {}, shell: 41, since: null, at: 5, resumed: null, failed: null, auto: true });
   assert.equal(readRecord({}), null);
   assert.equal(readRecord(undefined), null);
   assert.deepEqual(readRecord(labels({ session: ID, flags: "{broken" })).flags, []);
@@ -117,6 +117,39 @@ test("a shell resumes only its own terminal's lost session", () => {
   assert.equal(shouldResume({ ...rec, agent: "vim" }, { pid: 200, shellPid: 200 }).go, false);
   assert.equal(shouldResume(rec, { pid: null, shellPid: 200 }).go, false);
   assert.equal(shouldResume(null, { pid: 1, shellPid: 1 }).go, false);
+});
+
+test("a resume that failed is not tried again at the next restart", () => {
+  const rec = readRecord(labels({ agent: "claude", session: ID, shell: 100, failed: 9 }));
+  const verdict = shouldResume(rec, { pid: 200, shellPid: 200 });
+  assert.equal(verdict.go, false);
+  assert.equal(verdict.why, "the last resume failed");
+});
+
+test("a run that answers and quits is told from a session", () => {
+  assert.equal(isOneShot("claude", ["claude", "-p", "summarize"]), true);
+  assert.equal(isOneShot("claude", ["/usr/local/bin/claude", "--model", "opus", "--print", "hi"]), true);
+  assert.equal(isOneShot("claude", ["node", "/x/bin/claude", "-p", "hi"]), true);
+  assert.equal(isOneShot("claude", ["claude", "--model", "opus"]), false);
+  assert.equal(isOneShot("claude", ["claude", "--permission-mode", "plan"]), false, "a flag that only contains p");
+  assert.equal(isOneShot("codex", ["codex", "exec", "fix it"]), true);
+  assert.equal(isOneShot("codex", ["codex", "e", "fix it"]), true);
+  assert.equal(isOneShot("codex", ["codex", "-p", "work"]), false, "codex's -p is --profile");
+  assert.equal(isOneShot("codex", ["codex", "resume", ID]), false);
+  assert.equal(isOneShot("vim", ["vim", "-p"]), false);
+});
+
+test("a session keeps its agent's config folder, and only that", () => {
+  assert.deepEqual(agentEnv("claude", { CLAUDE_CONFIG_DIR: "/h/.claude-work", CODEX_HOME: "/c", PATH: "/bin" }), { CLAUDE_CONFIG_DIR: "/h/.claude-work" });
+  assert.deepEqual(agentEnv("codex", { CODEX_HOME: "/c" }), { CODEX_HOME: "/c" });
+  assert.deepEqual(agentEnv("claude", { CLAUDE_CONFIG_DIR: "" }), {});
+  const rec = readRecord(labels({ agent: "claude", session: ID, env: JSON.stringify({ CLAUDE_CONFIG_DIR: "/h/my work", LD_PRELOAD: "/evil.so" }) }));
+  assert.deepEqual(rec.env, { CLAUDE_CONFIG_DIR: "/h/my work" }, "a variable the agent doesn't declare is dropped");
+  assert.deepEqual(command(rec), ["env", "CLAUDE_CONFIG_DIR=/h/my work", "claude", "--resume", ID]);
+  assert.deepEqual(command(rec, "fork"), ["env", "CLAUDE_CONFIG_DIR=/h/my work", "claude", "--resume", ID, "--fork-session"]);
+  assert.match(resumeScript({ ...rec, cwd: "/w" }, "/e"), /env 'CLAUDE_CONFIG_DIR=\/h\/my work' claude --resume/);
+  assert.deepEqual(readRecord(labels({ agent: "claude", session: ID, env: "{broken" })).env, {});
+  assert.deepEqual(command(readRecord(labels({ agent: "claude", session: ID }))), ["claude", "--resume", ID], "no variables, no env");
 });
 
 test("the resume script runs the agent in its folder and reports a quick failure", () => {

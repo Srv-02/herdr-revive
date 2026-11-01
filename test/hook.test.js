@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { parseProcesses } from "../mods/revive/revive.mjs";
+import { parseProcesses, hasTranscript } from "../mods/revive/revive.mjs";
 import { hookOwner } from "../mods/revive/lib/core.js";
 
 const ENGINE = resolve("mods/revive/revive.mjs");
@@ -44,9 +44,9 @@ if (cmd === "get") {
   };
   const outer = agent("outer");
   const inner = agent("inner");
-  const run = (payload, { nested = false } = {}) => execFileSync(outer, [], {
+  const run = (payload, { nested = false, env = {} } = {}) => execFileSync(outer, [], {
     input: JSON.stringify(payload),
-    env: { ...process.env, HC_TERMINAL_ID: "t1", REVIVE_HC: hc, NESTED: nested ? inner : "", FAKE_FG: "" },
+    env: { ...base, HC_TERMINAL_ID: "t1", REVIVE_HC: hc, NESTED: nested ? inner : "", FAKE_FG: "", ...env },
   });
   const calls = () => (existsSync(join(dir, "labels.log")) ? readFileSync(join(dir, "labels.log"), "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []);
   const set = (calls) => Object.fromEntries(calls.flat().map((a) => [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]));
@@ -55,6 +55,11 @@ if (cmd === "get") {
 
 const start = { hook_event_name: "SessionStart", session_id: ID, cwd: "/w", source: "startup" };
 const end = (reason) => ({ hook_event_name: "SessionEnd", session_id: ID, reason });
+// The test runner's own CLAUDE_CONFIG_DIR / CODEX_HOME must not leak into records.
+const base = { ...process.env };
+delete base.CLAUDE_CONFIG_DIR;
+delete base.CODEX_HOME;
+
 const remembered = { "revive.agent": "claude", "revive.session": ID, "revive.shell": "4242" };
 
 test("the foreground agent's SessionStart is remembered, with its flags", () => {
@@ -71,6 +76,31 @@ test("a `claude -p` the agent runs as a tool records nothing", () => {
   const { run, calls } = setup();
   run(start, { nested: true });
   assert.deepEqual(calls(), []);
+});
+
+test("a `claude -p` typed in the terminal records nothing", () => {
+  const { run, calls } = setup({ argv: ["claude", "-p", "summarize this"] });
+  run(start);
+  run(end("other"));
+  assert.deepEqual(calls(), []);
+});
+
+test("a `claude -p` typed in the terminal leaves the remembered session alone", () => {
+  const { run, calls } = setup({ labels: remembered, argv: ["claude", "-p", "summarize this"] });
+  run({ ...start, session_id: "11111111-2222-4333-8444-555566667777" });
+  assert.deepEqual(calls(), []);
+});
+
+test("the session's config folder is remembered with it", () => {
+  const { run, calls, set } = setup();
+  run(start, { env: { CLAUDE_CONFIG_DIR: "/h/.claude-work", CODEX_HOME: "/c" } });
+  assert.equal(set(calls())["revive.env"], '{"CLAUDE_CONFIG_DIR":"/h/.claude-work"}');
+});
+
+test("a session without a config folder clears an older one's", () => {
+  const { run, calls, set } = setup({ labels: { ...remembered, "revive.env": '{"CLAUDE_CONFIG_DIR":"/old"}' } });
+  run(start);
+  assert.equal(set(calls())["revive.env"], "");
 });
 
 test("the command line wins over a previous agent's report", () => {
@@ -170,4 +200,13 @@ test("a new session starts without a resumed mark", () => {
   const got = set(calls());
   assert.equal(got["revive.session"], ID);
   assert.equal(got["revive.resumed"], "");
+});
+
+test("a transcript is looked for in the session's own config folder", () => {
+  const work = mkdtempSync(join(tmpdir(), "revive-config-"));
+  mkdirSync(join(work, "projects", "-w"), { recursive: true });
+  writeFileSync(join(work, "projects", "-w", `${ID}.jsonl`), "{}\n");
+  const rec = { agent: "claude", session: ID, cwd: "/w", env: { CLAUDE_CONFIG_DIR: work } };
+  assert.equal(hasTranscript(rec), true);
+  assert.equal(hasTranscript({ ...rec, env: { CLAUDE_CONFIG_DIR: mkdtempSync(join(tmpdir(), "revive-empty-")) } }), false);
 });
