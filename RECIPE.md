@@ -40,9 +40,13 @@ agent's conversation into a new session beside it.
       (outline); for one that needs you, a solid **Resume** `↵`. A Claude Code session
       with no transcript yet can't be forked: the Fork buttons are disabled, F/D/T do
       nothing, and the card says *This session has no message yet, so there is nothing to
-      fork. Send it one first.* Without a session: *No Claude Code or Codex session in the
-      focused terminal.* On another machine: a note that Revive works on this computer for
-      now.
+      fork. Send it one first.* An agent running in the terminal with nothing on record
+      gets the same card without an id or buttons: its name, *Running*, its folder, and a
+      `dim` note that Revive has no record of it, so it can't be forked or brought back.
+      For Codex the note adds that Codex records a session at its first message, and not
+      at all while its shared background server runs it (`daemon_auto_start`). Without an
+      agent: *No Claude Code or Codex session in the focused terminal.* On another machine:
+      a note that Revive works on this computer for now.
     - **NEED YOU**: other terminals whose session is lost, interrupted or failed. Each row
       (48px, 10px radius, filled with `raised`, `hover` on hover, 4px apart) shows the
       agent (13px medium), the short id, *space / tab* and *resumed 3m ago* in `dim`, the
@@ -156,4 +160,9 @@ Labels are kept by herdr-core across its restarts and go away with the terminal.
 | `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `ZDOTDIR` | Honored when finding the files to install into (a session's own `CLAUDE_CONFIG_DIR`/`CODEX_HOME` is recorded with it); without `ZDOTDIR` in the environment, `zsh -c` is asked for it (it reads `~/.zshenv`) |
 
 Install writes through symlinks to the file they point at, keeps each file's permissions,
-and copies the original to `<file>.revive-backup` only the first time.
+and copies the original to `<file>.revive-backup` only the first time. A settings file
+whose Revive hooks are already right (the same command and timeout) is not written, even
+when another tool reformatted it or added its own groups after Revive's: other tools (Herdr's
+own Codex integration among them) rewrite `~/.codex/hooks.json` too. Each hook has a
+10 second timeout, except Codex's `SessionEnd`, which gets 3: Codex clamps it to 3 and
+warns at every start about anything longer.

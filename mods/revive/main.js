@@ -197,6 +197,7 @@ export default class Revive extends View {
     if (this.focus?.includes("/")) {
       return div().text_size(12).text_color(t.dim).child("The focused terminal is on another machine. Revive works on this computer for now.");
     }
+    if (!entry?.rec && AGENTS[entry?.live]) return this.unrecordedCard(t, entry);
     if (!entry?.rec) {
       return div().text_size(12).text_color(t.dim).child(this.loading ? "Looking…" : "No Claude Code or Codex session in the focused terminal.");
     }
@@ -223,6 +224,27 @@ export default class Revive extends View {
           .child(button(t, "fork-tab", "Fork to a tab", () => this.fork(entry, "tab"), { hint: "T", disabled: empty })))
         .when(NEEDS_YOU.has(state), (el) => el
           .child(button(t, "resume-here", this.busy ? "Resuming…" : "Resume", (_e, cx) => this.resume(entry, cx), { kind: "solid", hint: "↵", disabled: this.busy }))));
+  }
+
+  /**
+   * An agent running in the focused terminal that Revive has no record of. A
+   * Codex session is recorded at its first message, and never while Codex's
+   * shared background server runs it: that server, not the terminal, runs the
+   * hooks, so they can't tell which terminal the session is in.
+   */
+  unrecordedCard(t, entry) {
+    const agent = AGENTS[entry.live];
+    const why = entry.live === "codex"
+      ? "Revive has no record of this session, so it can't be forked or brought back. Codex records it at its first message, and not at all while its shared background server runs it (daemon_auto_start)."
+      : "Revive has no record of this session, so it can't be forked or brought back. It is recorded when it starts once Revive is installed.";
+    return v_flex().gap(12).p(14).rounded(12).bg(t.raised).border_1().border_color(t.border)
+      .child(h_flex().gap(8).items_center()
+        .child(div().text_size(14).font_semibold().text_color(t.foreground).child(agent.name))
+        .child(div().flex_1())
+        .child(badge(t, "running")))
+      .child(v_flex().gap(4).text_size(12).text_color(t.muted)
+        .when(Boolean(entry.folder), (el) => el.child(div().truncate().child(tilde(entry.folder))))
+        .child(div().text_color(t.dim).child(why)));
   }
 
   row(t, entry, i) {

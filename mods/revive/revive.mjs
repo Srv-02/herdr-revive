@@ -263,6 +263,8 @@ function describe(t, since, focus) {
       entry.unrecorded = true;
     }
   }
+  // An agent running with nothing on record: the dialog still names it, and its folder.
+  if (!entry.rec && live) entry.folder = t.foreground?.cwd ?? t.cwd ?? null;
   // Only the focused terminal's card offers Fork, so only it is checked.
   if (entry.rec && entry.state === "running" && t.address === focus) entry.forkable = forkable(entry.rec, t.foreground?.pid);
   return entry;
@@ -388,15 +390,24 @@ export function shellBlock(engine = ENGINE) {
   ].join("\n");
 }
 
-/** Adds (or, with remove, takes out) Revive's SessionStart/SessionEnd hooks. */
-export function withHooks(settings, { remove = false, matcher = false } = {}) {
+/**
+ * Adds (or, with remove, takes out) Revive's SessionStart/SessionEnd hooks.
+ * An event that already has exactly Revive's hook is left as it is, wherever
+ * it sits: other tools write this file too, and moving Revive's group back to
+ * the end each time would rewrite it for nothing. `timeouts` sets an event's
+ * timeout (Codex clamps SessionEnd to 3 seconds and warns about more).
+ */
+export function withHooks(settings, { remove = false, matcher = false, timeouts = {} } = {}) {
   const out = structuredClone(settings ?? {});
   out.hooks ??= {};
   for (const event of EVENTS) {
+    const timeout = timeouts[event] ?? 10;
+    const ours = (out.hooks[event] ?? []).flatMap((g) => (g.hooks ?? []).filter(isOurs));
+    if (!remove && ours.length === 1 && ours[0].command === HOOK_COMMAND && ours[0].timeout === timeout) continue;
     const groups = (out.hooks[event] ?? [])
       .map((g) => ({ ...g, hooks: (g.hooks ?? []).filter((h) => !isOurs(h)) }))
       .filter((g) => g.hooks.length);
-    if (!remove) groups.push({ ...(matcher ? { matcher: "" } : {}), hooks: [{ type: "command", command: HOOK_COMMAND, timeout: 10 }] });
+    if (!remove) groups.push({ ...(matcher ? { matcher: "" } : {}), hooks: [{ type: "command", command: HOOK_COMMAND, timeout }] });
     if (groups.length) out.hooks[event] = groups;
     else delete out.hooks[event];
   }
@@ -459,16 +470,31 @@ function shells(args) {
   return [RC[login] ? login : "zsh"];
 }
 
+/** Codex clamps a SessionEnd hook's timeout to 3 seconds and warns at every start about more. */
+const CODEX_HOOKS = { matcher: true, timeouts: { SessionEnd: 3 } };
+
+/**
+ * Writes Revive's hooks into a JSON settings file. A file whose hooks are
+ * already right is not written, even when another tool formatted it
+ * differently (sorted its keys, say): only a real change rewrites it.
+ */
+function saveHooks(path, options) {
+  const before = readJson(path);
+  const after = withHooks(before, options);
+  if (existsSync(path) && JSON.stringify(after) === JSON.stringify(before)) return false;
+  return save(path, JSON.stringify(after, null, 2) + "\n");
+}
+
 function install(args, remove = false) {
   const changed = [];
   const claude = claudeSettings();
   if (!remove || existsSync(claude)) {
-    if (save(claude, JSON.stringify(withHooks(readJson(claude), { remove }), null, 2) + "\n")) changed.push(claude);
+    if (saveHooks(claude, { remove })) changed.push(claude);
   }
   if (!args.includes("--no-codex") && existsSync(codexDir())) {
     const codex = codexHooks();
     if (!remove || existsSync(codex)) {
-      if (save(codex, JSON.stringify(withHooks(readJson(codex), { remove, matcher: true }), null, 2) + "\n")) changed.push(codex);
+      if (saveHooks(codex, { remove, ...CODEX_HOOKS })) changed.push(codex);
     }
   }
   if (!args.includes("--no-shell")) {

@@ -260,3 +260,11 @@ test("a record's own config folder settles whether it can be forked", () => {
   transcript(own);
   assert.equal(list()[0].forkable, true);
 });
+
+test("an agent running with nothing on record is listed with its folder", () => {
+  const { list } = listSetup({});
+  const entry = list()[0];
+  assert.equal(entry.rec, null);
+  assert.equal(entry.live, "claude");
+  assert.equal(entry.folder, "/w");
+});
