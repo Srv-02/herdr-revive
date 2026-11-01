@@ -227,7 +227,22 @@ function claudeSessionFor(pid) {
   } catch { return null; }
 }
 
-function describe(t, since) {
+/**
+ * Whether a running session can be forked: a fork resumes it, so it needs a
+ * transcript. Only a sure "no" says false. A record without the agent's
+ * config folder (one from before Revive kept it) is checked against this
+ * process's folder only when the agent's own `sessions/<pid>.json` is there,
+ * which proves it is the same folder; otherwise the answer is unknown (null)
+ * and the fork is let through.
+ */
+function forkable(rec, fgPid) {
+  if (rec.agent !== "claude") return true;
+  const known = rec.env?.CLAUDE_CONFIG_DIR || (fgPid && claudeSessionFor(fgPid) !== null);
+  if (!known) return null;
+  return hasTranscript(rec);
+}
+
+function describe(t, since, focus) {
   const rec = readRecord(t.labels);
   const live = liveAgent(t);
   const entry = {
@@ -248,8 +263,8 @@ function describe(t, since) {
       entry.unrecorded = true;
     }
   }
-  // A fork resumes the session, so it needs the transcript too.
-  if (entry.rec) entry.forkable = hasTranscript(entry.rec);
+  // Only the focused terminal's card offers Fork, so only it is checked.
+  if (entry.rec && entry.state === "running" && t.address === focus) entry.forkable = forkable(entry.rec, t.foreground?.pid);
   return entry;
 }
 
@@ -258,7 +273,7 @@ async function list(args) {
   const terminals = await listTerminals();
   const pids = terminals.map((t) => t.pid).filter(Boolean);
   const procs = pids.length ? await processes(pids) : new Map();
-  const entries = terminals.map((t) => describe(t, procs.get(t.pid)?.since ?? null)).filter((e) => e.rec || e.address === focus);
+  const entries = terminals.map((t) => describe(t, procs.get(t.pid)?.since ?? null, focus)).filter((e) => e.rec || e.address === focus);
   // The setup only changes on install; the dialog asks for it when it opens and after.
   const out = { entries };
   if (args.includes("--setup")) out.setup = doctorReport();
