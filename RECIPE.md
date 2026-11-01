@@ -23,30 +23,37 @@ agent's conversation into a new session beside it.
 
 ## What you see
 
-- **Dialog** (`mod.open:revive`, 600px wide, 60% tall, on `popover`, 18px padding):
-  - A header: **↻ Revive** (15px semibold) and *Agent sessions, remembered on their
+- **Dialog** (`mod.open:revive`, 620px wide, as tall as its content, on `popover`, 20px
+  padding at the sides, 18px above and 16px below). The sessions scroll once the dialog
+  would pass 85% of the window; the header, the note and the footer always show.
+  - A header: **↻ Revive** (16px semibold) and *Agent sessions, remembered on their
     terminals* in `dim`.
-  - Sections titled in 10.5px `dim` capitals, in a scrolling column:
-    - **FOCUSED TERMINAL**: a `raised` card, 10px radius, 12px padding. The agent's name
-      (13px semibold), the first 8 characters of the session id in JetBrains Mono `dim`, and
-      a state on the right: a 6px dot and a word in the state's color (*Running* in
-      `working`, *Lost to a restart* and *Interrupted* in `blocked`, *Resume failed* in
-      `ansi1`). Under it the folder in `muted`, the carried flags in 10.5px mono `dim`, and
-      for a session started before Revive was installed, a note that it can be forked but
-      won't come back by itself. Buttons: for a running agent, **Fork right** `F`, **Fork
-      below** `D` and **Fork to a tab** `T` (outline); for one that needs you, a solid
-      **Resume** `↵`. Without a session: *No Claude Code or Codex session in the focused
-      terminal.* On another machine: a note that Revive works on this computer for now.
+  - Sections titled in 10.5px medium `dim` capitals:
+    - **FOCUSED TERMINAL**: a `raised` card with a `border`, 12px radius, 14px padding. The
+      agent's name (14px semibold), the first 8 characters of the session id in JetBrains
+      Mono `dim`, and a state on the right: a 6px dot and a word in the state's color
+      (*Running* in `ansi2`, *Lost to a restart* and *Interrupted* in `ansi3`, *Resume
+      failed* in `ansi1`). Under it the folder in `muted`, with the home folder as `~`, the
+      carried flags in 10.5px mono `dim`, and for a session started before Revive was
+      installed, a note that it can be forked but won't come back by itself. Buttons: for a
+      running agent, **Fork right** `F`, **Fork below** `D` and **Fork to a tab** `T`
+      (outline); for one that needs you, a solid **Resume** `↵`. A Claude Code session
+      with no transcript yet can't be forked: the Fork buttons are disabled, F/D/T do
+      nothing, and the card says *This session has no message yet, so there is nothing to
+      fork. Send it one first.* Without a session: *No Claude Code or Codex session in the
+      focused terminal.* On another machine: a note that Revive works on this computer for
+      now.
     - **NEED YOU**: other terminals whose session is lost, interrupted or failed. Each row
-      (40px, 8px radius, `hover` on hover) shows the agent, the short id, *space / tab* and
-      *resumed 3m ago* in `dim`, the state, an **Auto** / **Auto off** ghost toggle and a
-      solid **Resume**. Clicking the row closes the dialog and focuses that terminal.
-    - **OTHER SESSIONS**: the remaining ones, same rows without **Resume**. Sessions found
+      (48px, 10px radius, filled with `raised`, `hover` on hover, 4px apart) shows the
+      agent (13px medium), the short id, *space / tab* and *resumed 3m ago* in `dim`, the
+      state, an **Auto** / **Auto off** ghost toggle and a solid **Resume**. Clicking the
+      row closes the dialog and focuses that terminal.
+    - **OTHER SESSIONS**: the remaining ones, same rows without the fill or **Resume**. Sessions found
       through their pid but not remembered say *not remembered* instead of the toggle.
   - A note line for errors (`ansi1`) or install output (`muted`), on `raised`.
   - A footer above a `border` line: `✓ Claude Code hooks`, `✓ Codex hooks` (only when
-    Codex is installed), `✓ shell`, each `muted` when installed and `blocked` with `✕`
-    when not, and a solid **Install** button while anything is missing.
+    Codex is installed), `✓ shell`, each `muted` with a `ansi2` ✓ when installed and
+    `ansi1` with `✕` when not, and a solid **Install** button while anything is missing.
 - The list refreshes every 4 seconds while the dialog is open.
 - In a resumed pane, before the agent starts: `↻ Revive: resuming Claude Code session
   9e458eb4. REVIVE_AUTO=0 skips this.` in dim text.
@@ -117,6 +124,12 @@ Labels are kept by herdr-core across its restarts and go away with the terminal.
   valid, the last resume did not fail (`revive.failed` is unset), and (for Claude Code)
   the session's transcript exists. Without a transcript the record is dropped. A failed
   resume is not retried at every restart; **Resume** in the dialog still tries it.
+- `list` checks the transcript only for the focused terminal's running Claude Code
+  session, the one whose card offers Fork. It says `forkable: false` only when it is
+  sure: the record names its config folder, or the agent's `sessions/<pid>.json` is in
+  this process's folder. Otherwise it says `null` and the fork is let through, since an
+  agent started with a `CLAUDE_CONFIG_DIR` the app doesn't have keeps its transcripts
+  elsewhere.
 - `check` marks the terminal (`shell`, `since`, `resumed`) before printing, so a second
   shell can't resume the same session again.
 - The shell block runs what `check` printed at the first prompt (zsh: a one-time `precmd`

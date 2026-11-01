@@ -211,23 +211,52 @@ test("a transcript is looked for in the session's own config folder", () => {
   assert.equal(hasTranscript({ ...rec, env: { CLAUDE_CONFIG_DIR: mkdtempSync(join(tmpdir(), "revive-empty-")) } }), false);
 });
 
-test("the dialog can fork a session only once it has a transcript", () => {
+/** A fake `hc` with one live terminal running claude, for `revive.mjs list`. */
+function listSetup(labels) {
   const dir = mkdtempSync(join(tmpdir(), "revive-list-"));
   const hc = join(dir, "hc");
   writeFileSync(hc, `#!/usr/bin/env node
 const [cmd, t] = process.argv.slice(2);
-if (cmd === "ls") console.log(JSON.stringify({ terminals: [{ address: "t1" }] }));
+if (cmd === "ls") console.log(JSON.stringify({ terminals: [{ address: "t1" }, { address: "t2" }] }));
 else if (cmd === "get") console.log(JSON.stringify({ address: t, state: "live", pid: 4242, cwd: "/w",
-  labels: ${JSON.stringify({ ...remembered, "revive.cwd": "/w" })},
+  labels: ${JSON.stringify(labels)},
   foreground: { pid: 4243, argv: ["claude"], cwd: "/w" } }));
 `);
   chmodSync(hc, 0o755);
   const config = join(dir, "config");
-  const list = () => JSON.parse(execFileSync("node", [ENGINE, "list", "--focus", "t1"], {
-    env: { ...base, REVIVE_HC: hc, CLAUDE_CONFIG_DIR: config },
-  })).entries[0];
-  assert.equal(list().forkable, false);
-  mkdirSync(join(config, "projects", "-w"), { recursive: true });
-  writeFileSync(join(config, "projects", "-w", `${ID}.jsonl`), "{}\n");
-  assert.equal(list().forkable, true);
+  const list = (env = {}) => JSON.parse(execFileSync("node", [ENGINE, "list", "--focus", "t1"], {
+    env: { ...base, REVIVE_HC: hc, CLAUDE_CONFIG_DIR: config, ...env },
+  })).entries;
+  const transcript = (folder = config) => {
+    mkdirSync(join(folder, "projects", "-w"), { recursive: true });
+    writeFileSync(join(folder, "projects", "-w", `${ID}.jsonl`), "{}\n");
+  };
+  return { config, list, transcript };
+}
+
+test("the focused session can be forked only once it has a transcript", () => {
+  const { config, list, transcript } = listSetup({ ...remembered, "revive.cwd": "/w" });
+  // The agent's own sessions/<pid>.json proves the engine looks in its folder.
+  mkdirSync(join(config, "sessions"), { recursive: true });
+  writeFileSync(join(config, "sessions", "4243.json"), JSON.stringify({ sessionId: ID }));
+  assert.equal(list()[0].forkable, false);
+  transcript();
+  assert.equal(list()[0].forkable, true);
+  // Only the focused terminal is checked.
+  assert.equal(list()[1].forkable, undefined);
+});
+
+test("a fork isn't blocked when the session's config folder isn't known", () => {
+  // A record without env, and no sessions/<pid>.json here: the agent may keep
+  // its sessions in a folder this process doesn't know about.
+  const { list } = listSetup({ ...remembered, "revive.cwd": "/w" });
+  assert.equal(list()[0].forkable, null);
+});
+
+test("a record's own config folder settles whether it can be forked", () => {
+  const own = mkdtempSync(join(tmpdir(), "revive-own-"));
+  const { list, transcript } = listSetup({ ...remembered, "revive.cwd": "/w", "revive.env": JSON.stringify({ CLAUDE_CONFIG_DIR: own }) });
+  assert.equal(list()[0].forkable, false);
+  transcript(own);
+  assert.equal(list()[0].forkable, true);
 });

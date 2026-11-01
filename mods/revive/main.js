@@ -13,7 +13,23 @@ import { AGENTS, command, shortId, ago, shJoin } from "./lib/core.js";
 
 const ENGINE = () => `${appHome()}/mods/revive/revive.mjs`;
 const REFRESH_MS = 4000;
-const LIST_MAX_H = 360;
+// The dialog grows with its content up to this share of the window; past it, the sessions scroll.
+const MAX_SHARE = 0.85;
+// Room kept for the padding, the header and the footer; a note takes NOTE_H more.
+const CHROME_H = 130;
+const NOTE_H = 56;
+
+/**
+ * The tallest the sessions may be, in pixels, so the whole dialog fits the
+ * window, or null when the window's size isn't known. A dialog sized by its
+ * content can't shrink a part of itself, so the part gets a height of its own.
+ */
+function listMaxH(withNote) {
+  let height = null;
+  try { height = window.viewport_size()?.height; } catch { /* no window yet */ }
+  if (!Number.isFinite(height) || height <= 0) return null;
+  return Math.max(160, Math.floor(height * MAX_SHARE) - CHROME_H - (withNote ? NOTE_H : 0));
+}
 
 /** A folder the way a shell prompt shows it: the home folder as `~`. */
 function tilde(path) {
@@ -117,12 +133,8 @@ export default class Revive extends View {
 
   current() { return this.entries.find((e) => e.address === this.focus) ?? null; }
 
-  fork(entry, place, cx) {
-    if (entry?.forkable === false) {
-      this.note = { level: "error", text: NO_MESSAGE };
-      cx?.notify();
-      return;
-    }
+  fork(entry, place) {
+    if (entry?.forkable === false) return;
     const argv = command(entry?.rec, "fork");
     if (!argv) return;
     this.close();
@@ -172,9 +184,9 @@ export default class Revive extends View {
     if (k === "r") { this.load(cx); return; }
     if (!entry?.rec) return;
     if (entry.state === "running") {
-      if (k === "f") this.fork(entry, "right", cx);
-      else if (k === "d") this.fork(entry, "down", cx);
-      else if (k === "t") this.fork(entry, "tab", cx);
+      if (k === "f") this.fork(entry, "right");
+      else if (k === "d") this.fork(entry, "down");
+      else if (k === "t") this.fork(entry, "tab");
     } else if (k === "enter" && NEEDS_YOU.has(entry.state)) this.resume(entry, cx);
   }
 
@@ -206,9 +218,9 @@ export default class Revive extends View {
         .when(empty, (el) => el.child(div().text_color(t.dim).child(NO_MESSAGE))))
       .child(h_flex().gap(6).flex_wrap()
         .when(running, (el) => el
-          .child(button(t, "fork-right", "Fork right", (_e, cx) => this.fork(entry, "right", cx), { hint: "F", disabled: empty }))
-          .child(button(t, "fork-down", "Fork below", (_e, cx) => this.fork(entry, "down", cx), { hint: "D", disabled: empty }))
-          .child(button(t, "fork-tab", "Fork to a tab", (_e, cx) => this.fork(entry, "tab", cx), { hint: "T", disabled: empty })))
+          .child(button(t, "fork-right", "Fork right", () => this.fork(entry, "right"), { hint: "F", disabled: empty }))
+          .child(button(t, "fork-down", "Fork below", () => this.fork(entry, "down"), { hint: "D", disabled: empty }))
+          .child(button(t, "fork-tab", "Fork to a tab", () => this.fork(entry, "tab"), { hint: "T", disabled: empty })))
         .when(NEEDS_YOU.has(state), (el) => el
           .child(button(t, "resume-here", this.busy ? "Resuming…" : "Resume", (_e, cx) => this.resume(entry, cx), { kind: "solid", hint: "↵", disabled: this.busy }))));
   }
@@ -238,8 +250,8 @@ export default class Revive extends View {
     if (!s) return div();
     const shellOk = Object.values(s.shell ?? {}).some(Boolean);
     const ok = s.claude && shellOk;
-    const part = (name, on) => h_flex().gap(4).text_color(on ? t.muted : t.blocked)
-      .child(div().text_color(on ? t.ansi2 : t.blocked).child(on ? "✓" : "✕"))
+    const part = (name, on) => h_flex().gap(4).text_color(on ? t.muted : t.ansi1)
+      .child(div().text_color(on ? t.ansi2 : t.ansi1).child(on ? "✓" : "✕"))
       .child(name);
     return h_flex().gap(10).items_center().text_size(11)
       .child(part("Claude Code hooks", s.claude))
@@ -254,18 +266,19 @@ export default class Revive extends View {
     const others = this.entries.filter((e) => e.rec && e.address !== this.focus);
     const needs = others.filter((e) => NEEDS_YOU.has(e.state));
     const rest = others.filter((e) => !NEEDS_YOU.has(e.state));
+    const listH = listMaxH(Boolean(this.note));
     return v_flex().id("revive").track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
-      .size_full().bg(t.popover).px(20).pt(18).pb(16)
-      .child(h_flex().items_center().gap(8)
+      .w_full().bg(t.popover).px(20).pt(18).pb(16)
+      .child(h_flex().flex_none().items_center().gap(8)
         .child(div().text_size(16).font_semibold().text_color(t.foreground).child("↻ Revive"))
         .child(div().text_size(11.5).text_color(t.dim).child("Agent sessions, remembered on their terminals")))
-      .child(heading(t, "FOCUSED TERMINAL"))
-      .child(this.focusedCard(t))
-      .when(others.length > 0, (el) => el.child(div().id("revive-scroll").max_h(LIST_MAX_H).overflow_y_scrollbar()
+      .child(div().id("revive-scroll").when(listH !== null, (el) => el.max_h(listH)).overflow_y_scrollbar()
+        .child(heading(t, "FOCUSED TERMINAL"))
+        .child(this.focusedCard(t))
         .when(needs.length > 0, (el) => el.child(heading(t, "NEED YOU")).child(v_flex().gap(4).children(needs.map((e, i) => this.row(t, e, `n${i}`)))))
-        .when(rest.length > 0, (el) => el.child(heading(t, "OTHER SESSIONS")).child(v_flex().gap(4).children(rest.map((e, i) => this.row(t, e, `r${i}`)))))))
-      .when(Boolean(this.note), (el) => el.child(div().mt(8).p(8).rounded(6).bg(t.raised).text_size(11.5)
+        .when(rest.length > 0, (el) => el.child(heading(t, "OTHER SESSIONS")).child(v_flex().gap(4).children(rest.map((e, i) => this.row(t, e, `r${i}`))))))
+      .when(Boolean(this.note), (el) => el.child(div().flex_none().mt(8).p(8).rounded(6).bg(t.raised).text_size(11.5)
         .text_color(this.note.level === "error" ? t.ansi1 : t.muted).child(this.note.text)))
-      .child(div().mt(16).pt(12).border_t_1().border_color(t.border).child(this.setupLine(t)));
+      .child(div().flex_none().mt(16).pt(12).border_t_1().border_color(t.border).child(this.setupLine(t)));
   }
 }
