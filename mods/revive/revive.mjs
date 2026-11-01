@@ -2,15 +2,16 @@
 // Revive's engine. The mod can't run for a terminal while the app is closed or
 // the machine is rebooting, so the work happens where the session lives:
 //
-//   revive.mjs hook               Claude Code / Codex SessionStart and SessionEnd:
-//                                 remember the session on its terminal, or forget it
+//   revive.mjs hook [--agent K]   an agent's SessionStart and SessionEnd (Claude Code,
+//                                 Codex, Droid, Cursor): remember the session on its
+//                                 terminal, or forget it
 //   revive.mjs check --shell PID  from the shell's rc file: print the commands that
 //                                 resume a session lost to a restart, or nothing
 //   revive.mjs failed             the resume printed by `check` gave up at once
 //   revive.mjs list [--focus T]   every remembered session, as JSON, for the dialog
 //   revive.mjs resume T           resume T's session in T's shell
 //   revive.mjs auto T on|off      allow or stop automatic resume for T
-//   revive.mjs install [--zsh] [--bash] [--no-shell] [--no-codex]
+//   revive.mjs install [--zsh] [--bash] [--no-shell] [--no-codex] [--no-droid] [--no-cursor]
 //   revive.mjs uninstall
 //   revive.mjs doctor             what is installed, as JSON
 //
@@ -23,9 +24,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
-  AGENTS, agentKey, carriedFlags, hookOwner, readRecord, labelArgs, clearArgs, resumedArgs, stateOf, shouldResume,
-  resumeScript, resumeLine, shQuote, validId,
+  AGENTS, agentKey, carriedFlags, hookOwner, hookPayload, endAction, readRecord, labelArgs, clearArgs, resumedArgs, stateOf,
+  shouldResume, resumeScript, resumeLine, shQuote, validId,
 } from "./lib/core.js";
+import { agentDirs, findSession } from "./lib/sessions.js";
 
 const run = promisify(execFile);
 export const ENGINE = fileURLToPath(import.meta.url);
@@ -103,18 +105,20 @@ async function startOf(pid) {
   return (await processes([pid])).get(pid)?.since ?? null;
 }
 
-function agentFromPayload(payload) {
-  const path = String(payload.transcript_path ?? "");
-  if (path.includes("/.codex/")) return "codex";
-  if (path.includes("/.claude/") || path.includes("/projects/")) return "claude";
-  return null;
-}
+/**
+ * `--agent K`: the agent the hook was installed for (Droid's and Cursor's
+ * hooks say so; Claude Code's and Codex's, from earlier versions, don't).
+ */
+const hintOf = (args) => {
+  const i = args.indexOf("--agent");
+  return i >= 0 && Object.prototype.hasOwnProperty.call(AGENTS, args[i + 1]) ? args[i + 1] : null;
+};
 
-async function hook() {
-  const payload = await readStdin();
+async function hook(args = []) {
+  const payload = hookPayload(await readStdin());
   const t = process.env.HC_TERMINAL_ID;
-  const event = payload.hook_event_name;
-  if (!t || !validId(payload.session_id)) return;
+  const { event, session } = payload;
+  if (!t || !validId(session)) return;
   const terminal = await getTerminal(t);
   // The hook must belong to the agent in the terminal's foreground, not to a
   // `claude -p` that agent ran as a tool (it inherits HC_TERMINAL_ID too).
@@ -132,12 +136,12 @@ async function hook() {
     const argv = agentKey(null, fgArgv) ? fgArgv : table.get(owner.agent)?.argv ?? fgArgv;
     // The command line first: the terminal's last OSC report may still be a
     // previous agent's, sent before this one reported anything.
-    const key = agentKey(null, argv) ?? agentFromPayload(payload) ?? agentKey(terminal.status?.app);
+    const key = agentKey(null, argv) ?? hintOf(args) ?? payload.agent ?? agentKey(terminal.status?.app);
     if (!key) return;
-    const same = rec?.session === payload.session_id;
+    const same = rec?.session === session;
     await label(t, labelArgs({
       agent: key,
-      session: payload.session_id,
+      session,
       cwd: payload.cwd || terminal.foreground?.cwd || terminal.cwd || "",
       flags: JSON.stringify(carriedFlags(key, argv)),
       shell: terminal.pid ?? "",
@@ -153,14 +157,14 @@ async function hook() {
   }
 
   if (event === "SessionEnd") {
-    if (!rec || rec.session !== payload.session_id) return;
-    // `/clear` (and `/resume` from inside) ends one session to start another
-    // in the same process; that one's SessionStart records it, and clearing
-    // here could race it and erase the new record.
-    if (payload.reason === "clear" || payload.reason === "resume") return;
-    // A signal (a crash, a kill, a shutdown) reports "other": the record stays,
-    // worth bringing back. `/exit`, Ctrl+C, `/logout`: the person ended it.
-    if (payload.reason !== "other") await label(t, clearArgs());
+    if (!rec || rec.session !== session) return;
+    // Claude Code's reasons (Codex and Droid share them): `/clear` (and
+    // `/resume` from inside) ends one session to start another in the same
+    // process; that one's SessionStart records it, and clearing here could race
+    // it and erase the new record. A signal (a crash, a kill, a shutdown)
+    // reports "other": the record stays, worth bringing back. `/exit`, Ctrl+C,
+    // `/logout`: the person ended it. Cursor's are in its AGENTS entry.
+    if (endAction(rec.agent, payload.reason) === "forget") await label(t, clearArgs());
   }
 }
 
@@ -209,16 +213,10 @@ async function failed() {
 
 // ── the dialog ──────────────────────────────────────────────────────────────
 
-/** Claude Code keeps `sessions/<pid>.json` for each interactive process. */
-function claudeSessionFor(pid) {
-  const dir = join(claudeDir(), "sessions");
-  try {
-    const id = JSON.parse(readFileSync(join(dir, `${pid}.json`), "utf8")).sessionId;
-    return validId(id) ? id : null;
-  } catch { return null; }
-}
+/** A `ps` start time (`Sat Oct 31 18:49:55 2026`, in LC_ALL=C) in ms, or null. */
+const startMs = (since) => { const ms = Date.parse(since ?? ""); return Number.isFinite(ms) ? ms : null; };
 
-function describe(t, since) {
+function describe(t, since, fgSince = null) {
   const rec = readRecord(t.labels);
   const live = liveAgent(t);
   const entry = {
@@ -230,11 +228,13 @@ function describe(t, since) {
     rec,
     state: rec ? stateOf(rec, { live: live === rec.agent, pid: t.pid ?? null, since }) : null,
   };
-  // A live agent nobody recorded yet (started before Revive was installed).
-  if (!rec && live === "claude" && t.foreground?.pid) {
-    const session = claudeSessionFor(t.foreground.pid);
+  // A live agent nobody recorded yet (started before Revive was installed),
+  // found from the files it writes (lib/sessions.js).
+  if (!rec && live && t.foreground?.pid) {
+    const cwd = t.foreground.cwd ?? t.cwd ?? null;
+    const session = findSession(live, { dirs: agentDirs(), pid: t.foreground.pid, cwd, startedMs: startMs(fgSince) });
     if (session) {
-      entry.rec = { agent: "claude", session, cwd: t.foreground.cwd ?? t.cwd ?? null, flags: carriedFlags("claude", t.foreground.argv), shell: t.pid, auto: true };
+      entry.rec = { agent: live, session, cwd, flags: carriedFlags(live, t.foreground.argv), shell: t.pid, auto: true };
       entry.state = "running";
       entry.unrecorded = true;
     }
@@ -245,9 +245,10 @@ function describe(t, since) {
 async function list(args) {
   const focus = args.includes("--focus") ? args[args.indexOf("--focus") + 1] : null;
   const terminals = await listTerminals();
-  const pids = terminals.map((t) => t.pid).filter(Boolean);
-  const procs = pids.length ? await processes(pids) : new Map();
-  const entries = terminals.map((t) => describe(t, procs.get(t.pid)?.since ?? null)).filter((e) => e.rec || e.address === focus);
+  const pids = terminals.flatMap((t) => [t.pid, t.foreground?.pid]).filter(Boolean);
+  const procs = pids.length ? await processes([...new Set(pids)]) : new Map();
+  const since = (pid) => (pid ? procs.get(pid)?.since ?? null : null);
+  const entries = terminals.map((t) => describe(t, since(t.pid), since(t.foreground?.pid))).filter((e) => e.rec || e.address === focus);
   // The setup only changes on install; the dialog asks for it when it opens and after.
   const out = { entries };
   if (args.includes("--setup")) out.setup = doctorReport();
@@ -282,9 +283,12 @@ async function auto(args) {
 // ── install ─────────────────────────────────────────────────────────────────
 
 const HOOK_COMMAND = `node ${shQuote(ENGINE)} hook`;
+const hookCommand = (agent = null) => (agent ? `${HOOK_COMMAND} --agent ${agent}` : HOOK_COMMAND);
 const claudeSettings = () => join(claudeDir(), "settings.json");
 const codexDir = () => process.env.CODEX_HOME || join(homedir(), ".codex");
 const codexHooks = () => join(codexDir(), "hooks.json");
+const factoryDir = () => agentDirs({ ...process.env, HOME: homedir() }).factory;
+const cursorDir = () => agentDirs({ ...process.env, HOME: homedir() }).cursor;
 
 /**
  * Herdr starts terminals as login shells (`zsh -l`, `bash -l`). zsh reads
@@ -362,15 +366,18 @@ export function shellBlock(engine = ENGINE) {
   ].join("\n");
 }
 
-/** Adds (or, with remove, takes out) Revive's SessionStart/SessionEnd hooks. */
-export function withHooks(settings, { remove = false, matcher = false } = {}) {
+/**
+ * Adds (or, with remove, takes out) Revive's SessionStart/SessionEnd hooks, in
+ * Claude Code's format, which Codex and Factory Droid share.
+ */
+export function withHooks(settings, { remove = false, matcher = false, agent = null } = {}) {
   const out = structuredClone(settings ?? {});
   out.hooks ??= {};
   for (const event of EVENTS) {
     const groups = (out.hooks[event] ?? [])
       .map((g) => ({ ...g, hooks: (g.hooks ?? []).filter((h) => !isOurs(h)) }))
       .filter((g) => g.hooks.length);
-    if (!remove) groups.push({ ...(matcher ? { matcher: "" } : {}), hooks: [{ type: "command", command: HOOK_COMMAND, timeout: 10 }] });
+    if (!remove) groups.push({ ...(matcher ? { matcher: "" } : {}), hooks: [{ type: "command", command: hookCommand(agent), timeout: 10 }] });
     if (groups.length) out.hooks[event] = groups;
     else delete out.hooks[event];
   }
@@ -379,6 +386,56 @@ export function withHooks(settings, { remove = false, matcher = false } = {}) {
 }
 
 export const hasHooks = (settings) => EVENTS.every((e) => (settings?.hooks?.[e] ?? []).some((g) => (g.hooks ?? []).some(isOurs)));
+
+/**
+ * Droid's standalone `~/.factory/hooks.json` holds the same event map with no
+ * `hooks` wrapper around it.
+ */
+const unwrapped = (fn) => (doc, opts) => fn({ hooks: doc ?? {} }, opts).hooks ?? {};
+const withBareHooks = unwrapped(withHooks);
+const hasBareHooks = (doc) => hasHooks({ hooks: doc ?? {} });
+
+/**
+ * Cursor's `~/.cursor/hooks.json`: `{ version: 1, hooks: { sessionStart:
+ * [{ command }], … } }`, camelCase events and no groups. No timeout is
+ * written: the docs don't give its unit.
+ */
+const CURSOR_EVENTS = ["sessionStart", "sessionEnd"];
+export function withCursorHooks(doc, { remove = false } = {}) {
+  const out = structuredClone(doc ?? {});
+  if (!remove) out.version ??= 1;
+  out.hooks ??= {};
+  for (const event of CURSOR_EVENTS) {
+    const list = (out.hooks[event] ?? []).filter((h) => !isOurs(h));
+    if (!remove) list.push({ command: hookCommand("cursor") });
+    if (list.length) out.hooks[event] = list;
+    else delete out.hooks[event];
+  }
+  if (!Object.keys(out.hooks).length) delete out.hooks;
+  return out;
+}
+export const hasCursorHooks = (doc) => CURSOR_EVENTS.every((e) => (doc?.hooks?.[e] ?? []).some(isOurs));
+
+/**
+ * Where each agent's hooks are installed. `files` lists every file they may
+ * be in; `target` is the one the agent reads now (Droid reads settings.json's
+ * `hooks` only while there is no hooks.json). `optional` agents are installed
+ * only when their folder exists, and skipped with their `--no-…` flag.
+ */
+const HOOK_TARGETS = {
+  claude: { dir: claudeDir, files: () => [claudeSettings()], edit: (d, o) => withHooks(d, o), has: hasHooks },
+  codex: { dir: codexDir, optional: "--no-codex", trust: true, files: () => [codexHooks()], edit: (d, o) => withHooks(d, { ...o, matcher: true }), has: hasHooks },
+  droid: {
+    dir: factoryDir,
+    optional: "--no-droid",
+    files: () => [join(factoryDir(), "hooks.json"), join(factoryDir(), "settings.json")],
+    target: (files) => (existsSync(files[0]) ? files[0] : files[1]),
+    edit: (d, o, file) => (file.endsWith("hooks.json") ? withBareHooks(d, { ...o, agent: "droid" }) : withHooks(d, { ...o, agent: "droid" })),
+    has: (d, file) => (file.endsWith("hooks.json") ? hasBareHooks(d) : hasHooks(d)),
+  },
+  cursor: { dir: cursorDir, optional: "--no-cursor", files: () => [join(cursorDir(), "hooks.json")], edit: (d, o) => withCursorHooks(d, o), has: hasCursorHooks },
+};
+const targetOf = (h) => (h.target ?? ((files) => files[0]))(h.files());
 
 export function withShellBlock(text, { remove = false } = {}) {
   if (remove && !text.includes(BEGIN)) return text;
@@ -431,14 +488,19 @@ function shells(args) {
 
 function install(args, remove = false) {
   const changed = [];
-  const claude = claudeSettings();
-  if (!remove || existsSync(claude)) {
-    if (save(claude, JSON.stringify(withHooks(readJson(claude), { remove }), null, 2) + "\n")) changed.push(claude);
-  }
-  if (!args.includes("--no-codex") && existsSync(codexDir())) {
-    const codex = codexHooks();
-    if (!remove || existsSync(codex)) {
-      if (save(codex, JSON.stringify(withHooks(readJson(codex), { remove, matcher: true }), null, 2) + "\n")) changed.push(codex);
+  const trust = [];
+  for (const [key, h] of Object.entries(HOOK_TARGETS)) {
+    if (h.optional && (args.includes(h.optional) || !existsSync(h.dir()))) continue;
+    const target = targetOf(h);
+    for (const file of h.files()) {
+      // Install into the file the agent reads; take Revive out of every other.
+      // A file without Revive in it is left as it is, formatting and all.
+      const off = remove || file !== target;
+      if (off && !readText(file).includes("revive.mjs")) continue;
+      if (save(file, JSON.stringify(h.edit(readJson(file), { remove: off }, file), null, 2) + "\n")) {
+        changed.push(file);
+        if (!off && h.trust) trust.push(AGENTS[key].name);
+      }
     }
   }
   if (!args.includes("--no-shell")) {
@@ -448,15 +510,20 @@ function install(args, remove = false) {
     }
   }
   process.stdout.write(changed.length ? `${remove ? "Removed from" : "Updated"}:\n${changed.map((p) => `  ${p}`).join("\n")}\n` : "Nothing to change.\n");
-  if (!remove && changed.includes(codexHooks())) process.stdout.write("Codex asks to trust new hooks the next time it starts.\n");
+  for (const name of trust) process.stdout.write(`${name} asks to trust new hooks the next time it starts.\n`);
 }
 
 export function doctorReport() {
   const safe = (fn) => { try { return fn(); } catch { return false; } };
+  // Per agent: true or false, or null for an optional agent that isn't installed.
+  const hooks = Object.fromEntries(Object.entries(HOOK_TARGETS).map(([key, h]) => {
+    if (h.optional && !existsSync(h.dir())) return [key, null];
+    const file = targetOf(h);
+    return [key, safe(() => h.has(readJson(file), file))];
+  }));
   return {
     engine: ENGINE,
-    claude: safe(() => hasHooks(readJson(claudeSettings()))),
-    codex: existsSync(codexDir()) ? safe(() => hasHooks(readJson(codexHooks()))) : null,
+    ...hooks,
     shell: Object.fromEntries(Object.entries(RC).map(([s, rc]) => [s, readText(rc()).includes(BEGIN)])),
   };
 }
@@ -464,7 +531,7 @@ export function doctorReport() {
 // ── main ────────────────────────────────────────────────────────────────────
 
 const COMMANDS = {
-  hook: { run: hook, quiet: true },
+  hook: { run: (a) => hook(a), quiet: true },
   check: { run: check, quiet: true },
   failed: { run: failed, quiet: true },
   list: { run: list },

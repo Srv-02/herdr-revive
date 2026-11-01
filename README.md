@@ -13,23 +13,29 @@ flags.
 
 ![Revive](preview.png)
 
-Requires the **Herdr desktop app 0.1.9+**, **Node 20+**, and **Claude Code**. Codex support
-is experimental.
+Requires the **Herdr desktop app 0.1.9+**, **Node 20+**, and **Claude Code**. Codex,
+[Factory Droid](https://docs.factory.com) (`droid`) and the
+[Cursor CLI](https://cursor.com/docs/cli/overview) (`cursor-agent`) are supported too, but
+experimental: see [Limits](#limits).
 
 ## Features
 
 - **Automatic resume.** After a reboot or a core restart, the pane's new shell runs
-  `claude --resume <id>` (or `codex resume <id>`) in the session's folder, before you touch
-  anything. A dim line says what it is doing.
+  `claude --resume <id>` (or `codex resume <id>`, `droid --resume <id>`,
+  `cursor-agent --resume <id>`) in the session's folder, before you touch anything. A dim
+  line says what it is doing.
 - **Only what was lost.** A session you ended yourself (`/exit`, Ctrl+C, `/logout`) is
   forgotten on the spot. A session that was never sent a message is skipped, since it has
   nothing to resume. A shell you start inside a pane never resumes anything.
 - **Same flags.** `--dangerously-skip-permissions`, `--model`, `--permission-mode`,
-  `--add-dir` and similar flags come back with the session. The first prompt and
-  `--resume` itself are left behind.
+  `--add-dir` and similar flags come back with the session; for Droid
+  `--skip-permissions-unsafe`, `--auto`, `-m`; for Cursor `--force`/`--yolo`, `--model`,
+  `--sandbox`, `--mode`. The first prompt, `--resume` itself and secrets (`--api-key`, `-H`)
+  are left behind.
 - **Fork.** Open the conversation of the focused agent as a new session beside it (right,
   below or in a new tab), with the same flags. Both work in the same folder; a fork copies
-  the conversation, not the files.
+  the conversation, not the files. Claude Code, Codex and Droid (`droid --fork <id>`) fork;
+  the Cursor CLI has no fork, so the dialog offers none for it.
 - **Resume by hand.** An agent that died under a shell that survived it (a crash, a `kill`)
   is listed as *Interrupted*, with a **Resume** button. One whose resume failed is listed
   as *Resume failed*.
@@ -52,7 +58,12 @@ node ~/.config/herdr-app/mods/revive/revive.mjs install
 ```
 
 `install` adds two hooks (`SessionStart`, `SessionEnd`) to `~/.claude/settings.json`, the
-same two to `~/.codex/hooks.json` when Codex is installed, and a short block to the file
+same two to `~/.codex/hooks.json` when Codex is installed (`~/.codex` exists), to Droid's
+hooks when `~/.factory` exists (`~/.factory/hooks.json` if you have one, else the `hooks` key
+of `~/.factory/settings.json`, since Droid reads that one only while there is no
+`hooks.json`), and `sessionStart`/`sessionEnd` to `~/.cursor/hooks.json` when `~/.cursor`
+exists. Droid's and Cursor's hooks run `revive.mjs hook --agent droid|cursor`. It also adds a
+short block to the file
 your login shell reads at start: `~/.zshrc` for zsh, and for bash the first of
 `~/.bash_profile`, `~/.bash_login` and `~/.profile` that exists (Herdr starts terminals as
 login shells, which don't read `~/.bashrc`). zsh is asked where its `.zshrc` is, so a
@@ -62,7 +73,8 @@ changes a file, the original is copied to `<file>.revive-backup`; later runs kee
 copy. Running it again
 changes nothing, so it is also how you update the shell block after updating Revive. The
 **Install** button in the dialog does the same. Codex asks you to trust new hooks the next
-time it starts.
+time it starts; Droid warns that its hooks changed and shows them in `/hooks`. `--no-codex`,
+`--no-droid` and `--no-cursor` leave that agent's files alone.
 
 ```sh
 node ~/.config/herdr-app/mods/revive/revive.mjs install --zsh --bash   # both shells
@@ -90,13 +102,16 @@ ln -s "$PWD/herdr-revive/mods/revive" ~/.config/herdr-app/mods/revive
 ## How it works
 
 1. When an agent starts a session in a Herdr terminal, its `SessionStart` hook runs
-   `revive.mjs hook`. That labels the terminal (`hc label`) with the agent, the session id,
+   `revive.mjs hook`. The session id is the hook's `session_id` (Claude Code, Codex, Droid)
+   or `conversation_id` (Cursor, whose folder comes from `workspace_roots`). That labels the
+   terminal (`hc label`) with the agent, the session id,
    the folder, the flags worth keeping, and the pid and start time of the terminal's
    program. Only the agent in the terminal's foreground is recorded (with any wrapper
    that launches it): a `claude -p` it runs as a tool is not.
 2. When the session ends, `SessionEnd` tells why. You ended it: the labels go. A signal
    ended it (reason `other`): the labels stay. `/clear` leaves them to the new session,
-   which records itself.
+   which records itself. Droid sends Claude Code's reasons. Cursor's `completed` and
+   `user_close` forget the session; anything else (`aborted`, `error`, …) keeps it.
 3. After a reboot or a core restart, herdr-core gives the terminal a new shell. Its rc file
    checks, without starting anything, that a session is remembered and that it is the
    terminal's own shell, then asks `revive.mjs check`. A terminal whose program is no
@@ -119,13 +134,26 @@ REVIVE_DEBUG=1 zsh               # say why a shell did or didn't resume
 
 - Local only. Terminals on another machine are not remembered yet.
 - Sessions started before Revive was installed have no record. The dialog still finds a
-  running Claude Code session through its pid, so it can be forked, but it won't come
-  back by itself.
+  running one from the files its agent writes (Claude Code: `sessions/<pid>.json`; Droid:
+  the newest `~/.factory/sessions/<folder, dashed>/<id>.jsonl` written since it started;
+  Cursor: the newest `~/.cursor/chats/<md5 of the folder>/<id>/`), so it can be forked, but
+  it won't come back by itself.
 - An agent that died while its shell lived on is not resumed automatically, since nothing
   told the shell. Use **Resume** in the dialog.
 - Codex has not been tested end to end. Its hooks follow the same format as Claude Code's,
   and Codex behind a wrapper (npm's `node …/bin/codex`, a launcher script) is recognized,
   but Revive can't check whether a Codex session can be resumed before trying.
+- Droid and the Cursor CLI are built from their documentation and have not been tested
+  end to end. Not verified yet: Droid's `--fork` opening an interactive session and the
+  name it reports to Herdr; that Cursor's CLI fires `sessionStart`/`sessionEnd` hooks with a
+  `conversation_id` that `--resume` takes (third-party reports say it does), which
+  `sessionEnd` reasons it sends for `/exit`, Ctrl+C or a shutdown, and that hooks printing
+  nothing are fine with it; the two session-file layouts above. Like Codex, neither is
+  checked for a resumable session before trying: a failed resume is marked *Resume failed*.
+- Cursor installs as `cursor-agent` and `agent`. `agent` is a common name, so it counts as
+  Cursor only under a path that says so (`…/cursor-agent/…`) or when it reports itself as
+  Cursor to Herdr. Cursor's hooks also run for the Cursor editor's chats; outside a Herdr
+  terminal they do nothing.
 - Shell support: zsh and bash. Other shells can run `revive.mjs check --shell $$` from
   their own rc file and evaluate what it prints.
 

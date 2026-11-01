@@ -12,12 +12,33 @@ export const PREFIX = "revive.";
 export const KEYS = ["agent", "session", "cwd", "flags", "shell", "since", "at", "ended", "resumed", "failed", "auto"];
 
 /**
- * The agents Revive can bring back. `carry` lists the launch flags a resume or
- * fork keeps, so a session that ran with `--dangerously-skip-permissions` or
- * another model comes back the way it was: 0 for a switch, 1 for a flag that
- * takes a value, 2 for one that takes every value up to the next flag. Anything
- * else on the original command line (a first prompt, `--resume` itself) is
- * left behind.
+ * How an agent's SessionEnd reason is taken: "ignore" (the same process starts
+ * another session at once, and its SessionStart records it), "keep" (a signal,
+ * a crash: worth bringing back) or "forget" (the person ended it).
+ * Claude Code's reasons, which Codex and Factory Droid share.
+ */
+const claudeEnd = (reason) => (reason === "clear" || reason === "resume" ? "ignore" : reason === "other" ? "keep" : "forget");
+
+/**
+ * The agents Revive can bring back, one entry each:
+ * - `name`     what the person reads
+ * - `bin`      the program a resume or fork runs
+ * - `bins`     the program names it is known by on a command line (default: `bin`)
+ * - `match`    optional: a stricter test of one command-line word, for a name
+ *              too generic to trust on its own
+ * - `apps`     the names it reports itself by (OSC 7501 `app`)
+ * - `resume`   the command line that resumes a session
+ * - `fork`     the one that copies it into a new session, or null when the
+ *              agent can't (the dialog then offers no fork)
+ * - `end`      how its SessionEnd reasons are taken (see claudeEnd)
+ * - `carry`    the launch flags a resume or fork keeps, so a session that ran
+ *              with `--dangerously-skip-permissions` or another model comes
+ *              back the way it was: 0 for a switch, 1 for a flag that takes a
+ *              value, 2 for one that takes every value up to the next flag.
+ *              Anything else on the original command line (a first prompt,
+ *              `--resume` itself, a secret) is left behind.
+ * The engine (revive.mjs) has the other half: where each agent's hooks are
+ * installed, and lib/sessions.js how to find a session nobody recorded.
  */
 export const AGENTS = {
   claude: {
@@ -26,6 +47,7 @@ export const AGENTS = {
     apps: ["claude-code", "claude"],
     resume: (id, flags) => ["claude", ...flags, "--resume", id],
     fork: (id, flags) => ["claude", ...flags, "--resume", id, "--fork-session"],
+    end: claudeEnd,
     carry: {
       "--dangerously-skip-permissions": 0,
       "--allow-dangerously-skip-permissions": 0,
@@ -42,6 +64,7 @@ export const AGENTS = {
     apps: ["codex"],
     resume: (id, flags) => ["codex", "resume", ...flags, id],
     fork: (id, flags) => ["codex", "fork", ...flags, id],
+    end: claudeEnd,
     carry: {
       "--no-daemon": 0,
       "--dangerously-bypass-approvals-and-sandbox": 0,
@@ -58,10 +81,81 @@ export const AGENTS = {
       "--profile": 1,
     },
   },
+  // Factory Droid, from docs.factory.com/reference/cli-reference and
+  // hooks-reference. Unverified end to end (no droid on the machine it was
+  // written on): `--fork <id>` opening an interactive session, and the OSC
+  // app name it reports (`droid` is a guess). `-r` is left behind on purpose:
+  // it means --resume in interactive mode and --reasoning-effort in `exec`.
+  droid: {
+    name: "Droid",
+    bin: "droid",
+    apps: ["droid", "factory-droid"],
+    resume: (id, flags) => ["droid", ...flags, "--resume", id],
+    fork: (id, flags) => ["droid", ...flags, "--fork", id],
+    end: claudeEnd,
+    carry: {
+      "--skip-permissions-unsafe": 0,
+      "--auto": 1,
+      "-m": 1,
+      "--model": 1,
+      "--reasoning-effort": 1,
+      "--spec-model": 1,
+      "--spec-reasoning-effort": 1,
+      "--settings": 1,
+      "--only-tools": 1,
+      "--add-tools": 1,
+      "--remove-tools": 1,
+      "--disable-builtin-skills": 0,
+      "--append-system-prompt": 1,
+      "--append-system-prompt-file": 1,
+    },
+  },
+  // Cursor CLI, from cursor.com/docs/cli/reference/parameters and
+  // cursor.com/docs/agent/hooks. It installs as both `cursor-agent` and
+  // `agent`; `agent` is too generic a name, so it counts only under a path
+  // that says Cursor (the installer's ~/.local/share/cursor-agent/versions/…)
+  // or with a Cursor report. It has no fork. Unverified end to end (no
+  // cursor-agent on the machine it was written on): that the CLI's
+  // `conversation_id` is the chat id `--resume` takes, and which sessionEnd
+  // reasons the CLI sends for /exit, Ctrl+C or a shutdown. `--api-key` and
+  // `-H` are never carried: labels are readable by anything that asks hc.
+  cursor: {
+    name: "Cursor",
+    bin: "cursor-agent",
+    bins: ["cursor-agent", "agent"],
+    match: (word) => {
+      const name = base(word);
+      if (name === "cursor-agent") return true;
+      const dirs = String(word).split("/").slice(0, -1);
+      return ["agent", "node", "index.js"].includes(name) && dirs.some((d) => /^cursor(-agent)?$/i.test(d));
+    },
+    apps: ["cursor", "cursor-agent"],
+    resume: (id, flags) => ["cursor-agent", ...flags, "--resume", id],
+    fork: null,
+    // completed: the CLI's normal end; user_close: the IDE's. Anything else
+    // (aborted, error, window_close) is kept, to be offered back.
+    end: (reason) => (reason === "completed" || reason === "user_close" ? "forget" : "keep"),
+    carry: {
+      "-f": 0,
+      "--force": 0,
+      "--yolo": 0,
+      "-m": 1,
+      "--model": 1,
+      "--sandbox": 1,
+      "--approve-mcps": 0,
+      "--mode": 1,
+      "--plan": 0,
+      "--workspace": 1,
+      "--plugin-dir": 1,
+    },
+  },
 };
 
 const base = (path) => String(path ?? "").split("/").pop();
 const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
+/** Whether one command-line word is this agent's program. */
+const isBin = (agent, word) => (agent.match ? agent.match(word) : (agent.bins ?? [agent.bin]).includes(base(word)));
 
 /** The agent behind an OSC 7501 report (`claude-code`) or a command line, or null. */
 export function agentKey(app, argv = []) {
@@ -71,9 +165,43 @@ export function agentKey(app, argv = []) {
   // `claude …`, or a script run by its interpreter: `node …/bin/codex …`.
   for (const word of argv.slice(0, 2)) {
     for (const [key, agent] of Object.entries(AGENTS)) {
-      if (base(word) === agent.bin) return key;
+      if (isBin(agent, word)) return key;
     }
   }
+  return null;
+}
+
+/** Whether the agent can copy a session into a new one. */
+export const canFork = (key) => typeof AGENTS[key]?.fork === "function";
+
+/** What a SessionEnd with this reason means for the record: "ignore", "keep" or "forget". */
+export const endAction = (key, reason) => (AGENTS[key]?.end ?? claudeEnd)(reason);
+
+/**
+ * A hook's input, the same for every agent. Claude Code, Codex and Droid send
+ * `SessionStart` with `session_id` and `cwd`; Cursor sends `sessionStart` with
+ * `conversation_id` and `workspace_roots`. `agent` is what the payload itself
+ * says (its transcript path, Cursor's version field), or null.
+ */
+export function hookPayload(payload) {
+  const p = payload && typeof payload === "object" ? payload : {};
+  const name = typeof p.hook_event_name === "string" ? p.hook_event_name : "";
+  const roots = Array.isArray(p.workspace_roots) ? p.workspace_roots : [];
+  return {
+    event: name ? name[0].toUpperCase() + name.slice(1) : null,
+    session: p.session_id ?? p.conversation_id ?? null,
+    cwd: p.cwd || roots[0] || null,
+    reason: p.reason ?? null,
+    agent: payloadAgent(p),
+  };
+}
+
+function payloadAgent(p) {
+  const path = String(p.transcript_path ?? "");
+  if (path.includes("/.codex/")) return "codex";
+  if (path.includes("/.factory/")) return "droid";
+  if (path.includes("/.cursor/") || p.cursor_version !== undefined) return "cursor";
+  if (path.includes("/.claude/") || path.includes("/projects/")) return "claude";
   return null;
 }
 
@@ -82,7 +210,7 @@ export function carriedFlags(key, argv = []) {
   const carry = AGENTS[key]?.carry;
   if (!carry) return [];
   const out = [];
-  const start = argv.findIndex((word) => base(word) === AGENTS[key].bin);
+  const start = argv.findIndex((word) => isBin(AGENTS[key], word));
   for (let i = start < 0 ? 1 : start + 1; i < argv.length; i++) {
     const word = argv[i];
     const eq = word.indexOf("=");
@@ -121,7 +249,7 @@ export function hookOwner(table, start, target) {
   return { owned: false, agent: first };
 }
 
-/** Session ids are UUIDs for both agents; anything else is refused rather than quoted. */
+/** Session ids are UUIDs (Droid's docs show `session-abc123`); anything else is refused rather than quoted. */
 export const validId = (id) => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id);
 
 export const shortId = (id) => (id ? String(id).slice(0, 8) : "");
@@ -129,7 +257,7 @@ export const shortId = (id) => (id ? String(id).slice(0, 8) : "");
 /** The command line that resumes or forks a session. */
 export function command(rec, kind = "resume") {
   const agent = AGENTS[rec?.agent];
-  if (!agent || !validId(rec.session)) return null;
+  if (!agent || typeof agent[kind] !== "function" || !validId(rec.session)) return null;
   return agent[kind](rec.session, rec.flags ?? []);
 }
 

@@ -15,7 +15,7 @@ const ENGINE = resolve("mods/revive/revive.mjs");
 const ID = "0c8b28eb-1111-4222-8333-444455556666";
 
 /** A fake `hc`: `get` answers from state.json, `label` appends to labels.log. */
-function setup({ labels = {}, app = null, argv = ["claude", "--model", "opus", "fix it"] } = {}) {
+function setup({ labels = {}, app = null, argv = ["claude", "--model", "opus", "fix it"], bin: name0 = "claude" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "revive-hook-"));
   writeFileSync(join(dir, "state.json"), JSON.stringify({ labels, app, argv }));
   const hc = join(dir, "hc");
@@ -36,7 +36,7 @@ if (cmd === "get") {
   // either the hook or, through a shell the way an agent's tool call does,
   // another agent (a \`claude -p\` used as a tool).
   const agent = (name) => {
-    const bin = join(dir, name, "claude");
+    const bin = join(dir, name, name0);
     mkdirSync(join(dir, name));
     writeFileSync(bin, `#!/bin/sh\n[ -z "$FAKE_FG" ] && export FAKE_FG=$$\nif [ -n "$NESTED" ]; then NESTED= sh -c "\\"$NESTED\\"; true"; else node ${JSON.stringify(ENGINE)} hook; fi\n`);
     chmodSync(bin, 0o755);
@@ -170,4 +170,54 @@ test("a new session starts without a resumed mark", () => {
   const got = set(calls());
   assert.equal(got["revive.session"], ID);
   assert.equal(got["revive.resumed"], "");
+});
+
+// ── Factory Droid and Cursor ────────────────────────────────────────────────
+
+const droid = { bin: "droid", argv: ["droid", "--skip-permissions-unsafe", "-m", "gpt-5", "fix it"] };
+const cursor = { bin: "cursor-agent", argv: ["cursor-agent", "--force", "--model", "gpt-5", "fix it"] };
+const cursorStart = { hook_event_name: "sessionStart", conversation_id: ID, session_id: ID, generation_id: ID, workspace_roots: ["/w/app"], cursor_version: "2026.10.1", transcript_path: null };
+const cursorEnd = (reason) => ({ hook_event_name: "sessionEnd", conversation_id: ID, session_id: ID, reason, cursor_version: "2026.10.1" });
+
+test("droid's SessionStart is remembered, with its flags", () => {
+  const { run, calls, set } = setup(droid);
+  run({ ...start, transcript_path: "/Users/me/.factory/projects/-w/s.jsonl" });
+  const got = set(calls());
+  assert.equal(got["revive.agent"], "droid");
+  assert.equal(got["revive.session"], ID);
+  assert.equal(got["revive.flags"], '["--skip-permissions-unsafe","-m","gpt-5"]');
+});
+
+test("droid's own /exit forgets it, a signal keeps it", () => {
+  const exit = setup({ ...droid, labels: { ...remembered, "revive.agent": "droid" } });
+  exit.run(end("prompt_input_exit"));
+  assert.equal(exit.set(exit.calls())["revive.session"], "");
+  const kill = setup({ ...droid, labels: { ...remembered, "revive.agent": "droid" } });
+  kill.run(end("other"));
+  assert.deepEqual(kill.calls(), []);
+});
+
+test("Cursor's sessionStart is remembered from its conversation id and workspace", () => {
+  const { run, calls, set } = setup(cursor);
+  run(cursorStart);
+  const got = set(calls());
+  assert.equal(got["revive.agent"], "cursor");
+  assert.equal(got["revive.session"], ID);
+  assert.equal(got["revive.cwd"], "/w/app");
+  assert.equal(got["revive.flags"], '["--force","--model","gpt-5"]');
+});
+
+test("a bare `agent` that reports itself as Cursor is Cursor", () => {
+  const { run, calls, set } = setup({ bin: "cursor-agent", argv: ["agent", "--yolo"], app: "cursor" });
+  run(cursorStart);
+  assert.equal(set(calls())["revive.agent"], "cursor");
+});
+
+test("Cursor's completed session is forgotten; an aborted one is kept", () => {
+  const done = setup({ ...cursor, labels: { ...remembered, "revive.agent": "cursor" } });
+  done.run(cursorEnd("completed"));
+  assert.equal(done.set(done.calls())["revive.session"], "");
+  const aborted = setup({ ...cursor, labels: { ...remembered, "revive.agent": "cursor" } });
+  aborted.run(cursorEnd("aborted"));
+  assert.deepEqual(aborted.calls(), []);
 });
