@@ -87,6 +87,32 @@ every save:
 ln -s "$PWD/herdr-revive/mods/revive" ~/.config/herdr-app/mods/revive
 ```
 
+## Updates
+
+Herdr updates its own mods, not ones you added: yours is a copy, and nothing tells you
+when this repo changes. To hear about a new version, watch the repo for releases (on
+GitHub: **Watch → Custom → Releases**). Each
+[release](https://github.com/dmazlum/herdr-revive/releases) says what changed and whether
+`keys.json` did; merge it again when it did.
+
+The version you have is `"version"` in `~/.config/herdr-app/mods/revive/mod.json`. To
+update, ask your agent to replace that folder with the latest `mods/revive` from
+`github.com/dmazlum/herdr-revive`. Adding it again isn't enough: an agent never
+overwrites a mod, it would add a second copy under a new name. If the mod was renamed when
+it was added (a name clash), the renamed folder is the one to replace, renamed the same way.
+Or by hand:
+
+```sh
+git -C herdr-revive pull          # or clone it again
+rm -rf ~/.config/herdr-app/mods/revive
+cp -R herdr-revive/mods/revive ~/.config/herdr-app/mods/
+herdr-app check ~/.config/herdr-app/mods/revive
+node ~/.config/herdr-app/mods/revive/revive.mjs install
+```
+
+Run `install` after every update: it brings the hooks and the shell block up to date and
+changes nothing when they already are.
+
 ## How it works
 
 1. When an agent starts a session in a Herdr terminal, its `SessionStart` hook runs
