@@ -21,6 +21,8 @@ const STATE = {
   failed: { word: "Resume failed", color: (t) => t.ansi1 },
 };
 const NEEDS_YOU = new Set(["lost", "interrupted", "failed"]);
+// Claude Code writes a session down only once it has a message; until then `--resume` finds nothing.
+const NO_MESSAGE = "This session has no message yet, so there is nothing to fork. Send it one first.";
 
 async function engine(args) {
   let r;
@@ -107,7 +109,12 @@ export default class Revive extends View {
 
   current() { return this.entries.find((e) => e.address === this.focus) ?? null; }
 
-  fork(entry, place) {
+  fork(entry, place, cx) {
+    if (entry?.forkable === false) {
+      this.note = { level: "error", text: NO_MESSAGE };
+      cx?.notify();
+      return;
+    }
     const argv = command(entry?.rec, "fork");
     if (!argv) return;
     this.close();
@@ -157,9 +164,9 @@ export default class Revive extends View {
     if (k === "r") { this.load(cx); return; }
     if (!entry?.rec) return;
     if (entry.state === "running") {
-      if (k === "f") this.fork(entry, "right");
-      else if (k === "d") this.fork(entry, "down");
-      else if (k === "t") this.fork(entry, "tab");
+      if (k === "f") this.fork(entry, "right", cx);
+      else if (k === "d") this.fork(entry, "down", cx);
+      else if (k === "t") this.fork(entry, "tab", cx);
     } else if (k === "enter" && NEEDS_YOU.has(entry.state)) this.resume(entry, cx);
   }
 
@@ -176,6 +183,7 @@ export default class Revive extends View {
     const { rec, state } = entry;
     const agent = AGENTS[rec.agent];
     const running = state === "running";
+    const empty = running && entry.forkable === false;
     const flags = rec.flags?.length ? shJoin(rec.flags) : null;
     return v_flex().gap(10).p(12).rounded(10).bg(t.raised)
       .child(h_flex().gap(8).items_center()
@@ -186,12 +194,13 @@ export default class Revive extends View {
       .child(v_flex().gap(2).text_size(11.5).text_color(t.muted)
         .when(Boolean(rec.cwd), (el) => el.child(div().truncate().child(rec.cwd)))
         .when(Boolean(flags), (el) => el.child(div().truncate().text_color(t.dim).font_family("JetBrains Mono").text_size(10.5).child(flags)))
-        .when(Boolean(entry.unrecorded), (el) => el.child(div().text_color(t.dim).child("Started before Revive was installed: it can be forked, but won't come back by itself."))))
+        .when(Boolean(entry.unrecorded), (el) => el.child(div().text_color(t.dim).child("Started before Revive was installed: it can be forked, but won't come back by itself.")))
+        .when(empty, (el) => el.child(div().text_color(t.dim).child(NO_MESSAGE))))
       .child(h_flex().gap(6).flex_wrap()
         .when(running, (el) => el
-          .child(button(t, "fork-right", "Fork right", () => this.fork(entry, "right"), { hint: "F" }))
-          .child(button(t, "fork-down", "Fork below", () => this.fork(entry, "down"), { hint: "D" }))
-          .child(button(t, "fork-tab", "Fork to a tab", () => this.fork(entry, "tab"), { hint: "T" })))
+          .child(button(t, "fork-right", "Fork right", (_e, cx) => this.fork(entry, "right", cx), { hint: "F", disabled: empty }))
+          .child(button(t, "fork-down", "Fork below", (_e, cx) => this.fork(entry, "down", cx), { hint: "D", disabled: empty }))
+          .child(button(t, "fork-tab", "Fork to a tab", (_e, cx) => this.fork(entry, "tab", cx), { hint: "T", disabled: empty })))
         .when(NEEDS_YOU.has(state), (el) => el
           .child(button(t, "resume-here", this.busy ? "Resuming…" : "Resume", (_e, cx) => this.resume(entry, cx), { kind: "solid", hint: "↵", disabled: this.busy }))));
   }

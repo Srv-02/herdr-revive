@@ -210,3 +210,24 @@ test("a transcript is looked for in the session's own config folder", () => {
   assert.equal(hasTranscript(rec), true);
   assert.equal(hasTranscript({ ...rec, env: { CLAUDE_CONFIG_DIR: mkdtempSync(join(tmpdir(), "revive-empty-")) } }), false);
 });
+
+test("the dialog can fork a session only once it has a transcript", () => {
+  const dir = mkdtempSync(join(tmpdir(), "revive-list-"));
+  const hc = join(dir, "hc");
+  writeFileSync(hc, `#!/usr/bin/env node
+const [cmd, t] = process.argv.slice(2);
+if (cmd === "ls") console.log(JSON.stringify({ terminals: [{ address: "t1" }] }));
+else if (cmd === "get") console.log(JSON.stringify({ address: t, state: "live", pid: 4242, cwd: "/w",
+  labels: ${JSON.stringify({ ...remembered, "revive.cwd": "/w" })},
+  foreground: { pid: 4243, argv: ["claude"], cwd: "/w" } }));
+`);
+  chmodSync(hc, 0o755);
+  const config = join(dir, "config");
+  const list = () => JSON.parse(execFileSync("node", [ENGINE, "list", "--focus", "t1"], {
+    env: { ...base, REVIVE_HC: hc, CLAUDE_CONFIG_DIR: config },
+  })).entries[0];
+  assert.equal(list().forkable, false);
+  mkdirSync(join(config, "projects", "-w"), { recursive: true });
+  writeFileSync(join(config, "projects", "-w", `${ID}.jsonl`), "{}\n");
+  assert.equal(list().forkable, true);
+});
