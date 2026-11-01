@@ -248,6 +248,8 @@ function describe(t, since) {
       entry.unrecorded = true;
     }
   }
+  // A fork resumes the session, so it needs the transcript too.
+  if (entry.rec) entry.forkable = hasTranscript(entry.rec);
   return entry;
 }
 
