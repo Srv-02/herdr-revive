@@ -13,7 +13,9 @@ agent's conversation into a new session beside it.
    `cmd-shift-r` is already bound.
 5. Tell the person what `install` changes and ask before running it:
    `node ~/.config/herdr-app/mods/revive/revive.mjs install`. It edits
-   `~/.claude/settings.json` (only if `~/.claude` exists), `~/.codex/hooks.json` (only if `~/.codex` exists) and the
+   `~/.claude/settings.json` (only if `~/.claude` exists), `~/.codex/hooks.json` (only if `~/.codex` exists), links
+   `~/.pi/agent/extensions/herdr-revive.ts` to `mods/revive/pi/revive.ts` (only if
+   `~/.pi/agent` exists) and the
    file their login shell reads (`~/.zshrc`; for bash the first existing of
    `~/.bash_profile`, `~/.bash_login`, `~/.profile`), keeping the original of each as
    `.revive-backup`. If they use both zsh and bash, add `--zsh --bash`.
@@ -45,7 +47,7 @@ agent's conversation into a new session beside it.
       `dim` note that Revive has no record of it, so it can't be forked or brought back.
       For Codex the note adds that Codex records a session at its first message, and not
       at all while its shared background server runs it (`daemon_auto_start`). Without an
-      agent: *No Claude Code or Codex session in the focused terminal.* On another machine:
+      agent: *No Claude Code, Codex or pi session in the focused terminal.* On another machine:
       a note that Revive works on this computer for now.
     - **NEED YOU**: other terminals whose session is lost, interrupted or failed. Each row
       (48px, 10px radius, filled with `raised`, `hover` on hover, 4px apart) shows the
@@ -56,7 +58,7 @@ agent's conversation into a new session beside it.
       through their pid but not remembered say *not remembered* instead of the toggle.
   - A note line for errors (`ansi1`) or install output (`muted`), on `raised`.
   - A footer above a `border` line: `✓ Claude Code hooks` (only when Claude Code is installed), `✓ Codex hooks` (only when
-    Codex is installed), `✓ shell`, each `muted` with a `ansi2` ✓ when installed and
+    Codex is installed), `✓ pi extension` (only when pi is installed), `✓ shell`, each `muted` with a `ansi2` ✓ when installed and
     `ansi1` with `✕` when not, and a solid **Install** button while anything is missing.
 - The list refreshes every 4 seconds while the dialog is open.
 - In a resumed pane, before the agent starts: `↻ Revive: resuming Claude Code session
@@ -69,6 +71,7 @@ agent's conversation into a new session beside it.
 | `mods/revive/main.js` | The dialog |
 | `mods/revive/lib/core.js` | Agents, flags, labels, states and the resume script: plain functions shared by the dialog and the engine |
 | `mods/revive/revive.mjs` | The engine, run with the person's Node: hooks, the shell check, list, resume, install |
+| `mods/revive/pi/revive.ts` | pi's extension: runs `revive.mjs hook` at pi's session start and end, with Claude Code's payload |
 | `mods/revive/package.json` | Marks the folder as ES modules for Node |
 | `mods/revive/mod.json` | Opens as a dialog; docks nowhere |
 
@@ -78,11 +81,12 @@ A session is remembered as labels on its herdr-core terminal:
 
 | Label | Value |
 | --- | --- |
-| `revive.agent` | `claude` or `codex` |
+| `revive.agent` | `claude`, `codex` or `pi` |
 | `revive.session` | The session id |
 | `revive.cwd` | The folder the session ran in |
 | `revive.flags` | The carried launch flags, as a JSON array |
-| `revive.env` | The agent's config folder when the session ran under one (`{"CLAUDE_CONFIG_DIR": …}` or `{"CODEX_HOME": …}`), as a JSON object; absent otherwise |
+| `revive.env` | The agent's config folder when the session ran under one (`{"CLAUDE_CONFIG_DIR": …}`, `{"CODEX_HOME": …}`, `PI_CODING_AGENT_DIR` or `PI_CODING_AGENT_SESSION_DIR`), as a JSON object; absent otherwise |
+| `revive.transcript` | pi only: the session file pi named |
 | `revive.shell` | The pid of the terminal's program when the session started or was resumed |
 | `revive.since` | That program's start time (`ps -o lstart`), so a new shell that got an old pid after a reboot is still new |
 | `revive.at` | When it was recorded (ms) |
@@ -100,14 +104,23 @@ Labels are kept by herdr-core across its restarts and go away with the terminal.
   wrapper are one agent (npm's `node …/bin/codex` running the native `codex`, a launcher
   with another name). Agent, shell, agent is a tool call: a `claude -p` an agent runs
   inherits `HC_TERMINAL_ID`, but its hooks record nothing.
-- A one-shot run in the foreground (`claude -p`/`--print`, `codex exec`/`e`) records
-  nothing: it fires `SessionStart` and ends with reason `other`, so it would replace the
-  interactive session on record and be resumed after the next restart.
+- A one-shot run in the foreground (`claude -p`/`--print`, `codex exec`/`e`, `pi -p`,
+  `pi --mode json|rpc`, `pi --no-session`) records nothing: it fires `SessionStart` and
+  ends with reason `other`, so it would replace the interactive session on record and be
+  resumed after the next restart.
+- pi's extension acts only when `HC_TERMINAL_ID` is set, in pi's `tui` mode, for a session
+  with a file. It sends `SessionStart` at every `session_start` (startup, `/new`,
+  `/resume`, `/fork`, reload), with pi's command line as `argv` (pi renames its process
+  `pi`). At `session_shutdown` it sends `SessionEnd` with reason `prompt_input_exit` only
+  for `quit` without a SIGTERM or SIGHUP; a signal, or a session replaced in the same
+  process, sends nothing, which keeps the record like Claude Code's `other`. It finds the
+  engine as `../revive.mjs` from its own real path, so it must be linked, not copied
+  away from the mod.
 - The hook records the agent's `CLAUDE_CONFIG_DIR` or `CODEX_HOME` from its own
   environment. The transcript check looks in that folder, and resume and fork run the
   agent under it (`env CLAUDE_CONFIG_DIR=… claude …`). Only those two variables are read
   back from the label.
-- The agent is known by the foreground command line first, then the command line of the
+- The agent is known by the command line the hook sent (pi), then the foreground command line, then the
   agent process the hook came from, then the transcript path, and only then the
   terminal's last OSC report, which may still be a previous agent's. A running agent
   behind a wrapper is recognized by its report while something other than the shell is
@@ -146,7 +159,9 @@ Labels are kept by herdr-core across its restarts and go away with the terminal.
 - **Resume** in the dialog sends the command to the terminal with `hc send`, only when its
   foreground is the terminal's own shell, never into another running program.
 - Fork opens `terminal.open {argv, folder, place}` with the agent's fork command:
-  `claude … --resume <id> --fork-session`, `codex fork … <id>`.
+  `claude … --resume <id> --fork-session`, `codex fork … <id>`, `pi … --fork <id>`.
+- pi's transcript check is the recorded session file: it exists, or the session never got
+  a message. A record without one is let through.
 - Hooks never fail an agent: every error is swallowed and the exit code is 0.
 
 ## Settings
@@ -157,7 +172,7 @@ Labels are kept by herdr-core across its restarts and go away with the terminal.
 | `REVIVE_DEBUG=1` | The shell block says why it did or didn't resume, on stderr |
 | `REVIVE_HC` | The `hc` binary the engine and the shell block use (default: `hc` on PATH) |
 | `REVIVE_TTY` | The device the resume runs on, instead of the terminal's (for tests) |
-| `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `ZDOTDIR` | Honored when finding the files to install into (a session's own `CLAUDE_CONFIG_DIR`/`CODEX_HOME` is recorded with it); without `ZDOTDIR` in the environment, `zsh -c` is asked for it (it reads `~/.zshenv`) |
+| `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_DIR`, `ZDOTDIR` | Honored when finding the files to install into (a session's own `CLAUDE_CONFIG_DIR`/`CODEX_HOME`/`PI_CODING_AGENT_DIR`/`PI_CODING_AGENT_SESSION_DIR` is recorded with it); without `ZDOTDIR` in the environment, `zsh -c` is asked for it (it reads `~/.zshenv`) |
 
 Install writes through symlinks to the file they point at, keeps each file's permissions,
 and copies the original to `<file>.revive-backup` only the first time. A settings file

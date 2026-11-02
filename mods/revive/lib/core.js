@@ -9,7 +9,7 @@
 
 export const PREFIX = "revive.";
 // `ended` is no longer written; it stays here so clearing removes it from older records.
-export const KEYS = ["agent", "session", "cwd", "flags", "env", "shell", "since", "at", "ended", "resumed", "failed", "auto"];
+export const KEYS = ["agent", "session", "cwd", "flags", "env", "transcript", "shell", "since", "at", "ended", "resumed", "failed", "auto"];
 
 /**
  * The agents Revive can bring back. `carry` lists the launch flags a resume or
@@ -67,6 +67,48 @@ export const AGENTS = {
       "--ask-for-approval": 1,
       "-p": 1,
       "--profile": 1,
+    },
+  },
+  pi: {
+    name: "pi",
+    bin: "pi",
+    apps: ["pi"],
+    resume: (id, flags) => ["pi", ...flags, "--session", id],
+    fork: (id, flags) => ["pi", ...flags, "--fork", id],
+    env: ["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"],
+    oneShot: (args) => args.some((w, i) => w === "-p" || w === "--print" || w === "--no-session"
+      || /^--mode=(json|rpc)$/.test(w) || (w === "--mode" && /^(json|rpc)$/.test(args[i + 1] ?? ""))),
+    carry: {
+      "--provider": 1,
+      "--model": 1,
+      "--models": 1,
+      "--thinking": 1,
+      "-t": 1,
+      "--tools": 1,
+      "-xt": 1,
+      "--exclude-tools": 1,
+      "-nt": 0,
+      "--no-tools": 0,
+      "-nbt": 0,
+      "--no-builtin-tools": 0,
+      "-e": 1,
+      "--extension": 1,
+      "-ne": 0,
+      "--no-extensions": 0,
+      "--no-mcp": 0,
+      "--skill": 1,
+      "-ns": 0,
+      "--no-skills": 0,
+      "-nc": 0,
+      "--no-context-files": 0,
+      "--system-prompt": 1,
+      "--append-system-prompt": 1,
+      "--session-dir": 1,
+      "-a": 0,
+      "--approve": 0,
+      "-na": 0,
+      "--no-approve": 0,
+      "--offline": 0,
     },
   },
 };
@@ -149,7 +191,7 @@ export function hookOwner(table, start, target) {
   return { owned: false, agent: first };
 }
 
-/** Session ids are UUIDs for both agents; anything else is refused rather than quoted. */
+/** Session ids are UUIDs for every agent; anything else is refused rather than quoted. */
 export const validId = (id) => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id);
 
 export const shortId = (id) => (id ? String(id).slice(0, 8) : "");
@@ -198,6 +240,7 @@ export function readRecord(labels) {
     cwd: get("cwd") || null,
     flags,
     env,
+    transcript: get("transcript") || null,
     shell: num(get("shell")),
     since: get("since") || null,
     at: num(get("at")),

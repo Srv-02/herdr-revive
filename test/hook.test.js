@@ -15,7 +15,7 @@ const ENGINE = resolve("mods/revive/revive.mjs");
 const ID = "0c8b28eb-1111-4222-8333-444455556666";
 
 /** A fake `hc`: `get` answers from state.json, `label` appends to labels.log. */
-function setup({ labels = {}, app = null, argv = ["claude", "--model", "opus", "fix it"] } = {}) {
+function setup({ labels = {}, app = null, argv = ["claude", "--model", "opus", "fix it"], bin = "claude" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "revive-hook-"));
   writeFileSync(join(dir, "state.json"), JSON.stringify({ labels, app, argv }));
   const hc = join(dir, "hc");
@@ -36,11 +36,11 @@ if (cmd === "get") {
   // either the hook or, through a shell the way an agent's tool call does,
   // another agent (a \`claude -p\` used as a tool).
   const agent = (name) => {
-    const bin = join(dir, name, "claude");
+    const path = join(dir, name, bin);
     mkdirSync(join(dir, name));
-    writeFileSync(bin, `#!/bin/sh\n[ -z "$FAKE_FG" ] && export FAKE_FG=$$\nif [ -n "$NESTED" ]; then NESTED= sh -c "\\"$NESTED\\"; true"; else node ${JSON.stringify(ENGINE)} hook; fi\n`);
-    chmodSync(bin, 0o755);
-    return bin;
+    writeFileSync(path, `#!/bin/sh\n[ -z "$FAKE_FG" ] && export FAKE_FG=$$\nif [ -n "$NESTED" ]; then NESTED= sh -c "\\"$NESTED\\"; true"; else node ${JSON.stringify(ENGINE)} hook; fi\n`);
+    chmodSync(path, 0o755);
+    return path;
   };
   const outer = agent("outer");
   const inner = agent("inner");
@@ -59,6 +59,8 @@ const end = (reason) => ({ hook_event_name: "SessionEnd", session_id: ID, reason
 const base = { ...process.env };
 delete base.CLAUDE_CONFIG_DIR;
 delete base.CODEX_HOME;
+delete base.PI_CODING_AGENT_DIR;
+delete base.PI_CODING_AGENT_SESSION_DIR;
 
 const remembered = { "revive.agent": "claude", "revive.session": ID, "revive.shell": "4242" };
 
@@ -209,6 +211,26 @@ test("a transcript is looked for in the session's own config folder", () => {
   const rec = { agent: "claude", session: ID, cwd: "/w", env: { CLAUDE_CONFIG_DIR: work } };
   assert.equal(hasTranscript(rec), true);
   assert.equal(hasTranscript({ ...rec, env: { CLAUDE_CONFIG_DIR: mkdtempSync(join(tmpdir(), "revive-empty-")) } }), false);
+});
+
+test("pi's flags and session file come from its extension, since ps shows only `pi`", () => {
+  const { run, calls, set } = setup({ argv: ["pi"], bin: "pi", app: "pi" });
+  const file = "/h/.pi/agent/sessions/--w--/2026-11-02T10-00-00-000Z_" + ID + ".jsonl";
+  run({ ...start, transcript_path: file, argv: ["pi", "--model", "sonnet", "--thinking", "high", "fix it"] }, { env: { PI_CODING_AGENT_DIR: "/h/.pi-work" } });
+  const got = set(calls());
+  assert.equal(got["revive.agent"], "pi");
+  assert.equal(got["revive.flags"], '["--model","sonnet","--thinking","high"]');
+  assert.equal(got["revive.transcript"], file);
+  assert.equal(got["revive.env"], '{"PI_CODING_AGENT_DIR":"/h/.pi-work"}');
+});
+
+test("a pi session is resumable once its file exists", () => {
+  const dir = mkdtempSync(join(tmpdir(), "revive-pi-"));
+  const rec = { agent: "pi", session: ID, cwd: "/w", transcript: join(dir, `x_${ID}.jsonl`) };
+  assert.equal(hasTranscript(rec), false);
+  writeFileSync(rec.transcript, "{}\n");
+  assert.equal(hasTranscript(rec), true);
+  assert.equal(hasTranscript({ ...rec, transcript: null }), true, "no file named: unknown, let pi try");
 });
 
 /** A fake `hc` with one live terminal running claude, for `revive.mjs list`. */

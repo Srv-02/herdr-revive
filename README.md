@@ -13,15 +13,15 @@ flags.
 
 ![Revive](preview.png)
 
-Requires the **Herdr desktop app 0.1.9+**, **Node 20+**, and **Claude Code**. Codex support
-is experimental.
+Requires the **Herdr desktop app 0.1.9+**, **Node 20+**, and **Claude Code** or
+**[pi](https://pi.dev)**. Codex support is experimental.
 
 ## Features
 
 - **Automatic resume.** After a reboot or a core restart, the pane's new shell runs
-  `claude --resume <id>` (or `codex resume <id>`) in the session's folder, before you touch
-  anything. A dim line says what it is doing.
-- **Only what was lost.** A session you ended yourself (`/exit`, Ctrl+C, `/logout`) is
+  `claude --resume <id>` (or `pi --session <id>`, `codex resume <id>`) in the session's
+  folder, before you touch anything. A dim line says what it is doing.
+- **Only what was lost.** A session you ended yourself (`/exit`, Ctrl+C, `/logout`; pi's `/quit`) is
   forgotten on the spot. A session that was never sent a message is skipped, since it has
   nothing to resume. A shell you start inside a pane never resumes anything.
 - **Same flags.** `--dangerously-skip-permissions`, `--model`, `--permission-mode`,
@@ -53,7 +53,9 @@ node ~/.config/herdr-app/mods/revive/revive.mjs install
 
 `install` adds two hooks (`SessionStart`, `SessionEnd`) to `~/.claude/settings.json` when
 Claude Code is installed (`~/.claude` exists), the
-same two to `~/.codex/hooks.json` when Codex is installed, and a short block to the file
+same two to `~/.codex/hooks.json` when Codex is installed, links pi's extension
+(`mods/revive/pi/revive.ts`) as `~/.pi/agent/extensions/herdr-revive.ts` when pi is
+installed, and a short block to the file
 your login shell reads at start: `~/.zshrc` for zsh, and for bash the first of
 `~/.bash_profile`, `~/.bash_login` and `~/.profile` that exists (Herdr starts terminals as
 login shells, which don't read `~/.bashrc`). zsh is asked where its `.zshrc` is, so a
@@ -63,10 +65,13 @@ changes a file, the original is copied to `<file>.revive-backup`; later runs kee
 copy. Running it again
 changes nothing, so it is also how you update the shell block after updating Revive. The
 **Install** button in the dialog does the same. Codex asks you to trust new hooks the next
-time it starts.
+time it starts; pi loads the extension the next time it starts (or at `/reload`). An
+extension already at that path (a copy your package manager placed, say) is left as it
+is, and `uninstall` takes out only the link `install` made.
 
 ```sh
 node ~/.config/herdr-app/mods/revive/revive.mjs install --zsh --bash   # both shells
+node ~/.config/herdr-app/mods/revive/revive.mjs install --no-pi        # skip pi (or --no-codex)
 node ~/.config/herdr-app/mods/revive/revive.mjs uninstall              # take it all out
 node ~/.config/herdr-app/mods/revive/revive.mjs doctor                 # what is installed
 ```
@@ -118,7 +123,8 @@ changes nothing when they already are.
 ## How it works
 
 1. When an agent starts a session in a Herdr terminal, its `SessionStart` hook runs
-   `revive.mjs hook`. That labels the terminal (`hc label`) with the agent, the session id,
+   `revive.mjs hook` (pi has no hooks file: Revive's pi extension runs it with the same
+   payload). That labels the terminal (`hc label`) with the agent, the session id,
    the folder, the flags worth keeping, and the pid and start time of the terminal's
    program. Only the agent in the terminal's foreground is recorded (with any wrapper
    that launches it): a `claude -p` it runs as a tool is not.
@@ -170,6 +176,17 @@ REVIVE_DEBUG=1 zsh               # say why a shell did or didn't resume
     share the daemon.
   - Codex fires `SessionStart` at a session's first message, so a session is recorded
     only from then.
+- pi is recorded through its extension, only for an interactive pi in a herdr terminal
+  (not `-p`, `--mode json|rpc`, `--no-session`, or the subagents pi starts):
+  - pi reports `quit` for every end, `/quit` and a reboot alike. The extension tells
+    them apart by listening for the SIGTERM and SIGHUP a reboot, a core restart or a
+    `kill` sends: a session a signal ended stays remembered; one you quit is forgotten.
+  - pi renames its process `pi`, so `ps` and Herdr no longer see its flags; the
+    extension sends its command line with the hook.
+  - pi keeps sessions where its flags, environment or settings say, so the record names
+    the session file, and the transcript check looks only at that file.
+  - A pi started before the extension was installed (or before `/reload`) is not
+    recorded.
 - Shell support: zsh and bash. Other shells can run `revive.mjs check --shell $$` from
   their own rc file and evaluate what it prints.
 

@@ -45,7 +45,7 @@ const STATE = {
   failed: { word: "Resume failed", color: (t) => t.ansi1 },
 };
 const NEEDS_YOU = new Set(["lost", "interrupted", "failed"]);
-// Claude Code writes a session down only once it has a message; until then `--resume` finds nothing.
+// Claude Code and pi write a session down only once it has a message; until then a resume finds nothing.
 const NO_MESSAGE = "This session has no message yet, so there is nothing to fork. Send it one first.";
 
 async function engine(args) {
@@ -199,7 +199,7 @@ export default class Revive extends View {
     }
     if (!entry?.rec && AGENTS[entry?.live]) return this.unrecordedCard(t, entry);
     if (!entry?.rec) {
-      return div().text_size(12).text_color(t.dim).child(this.loading ? "Looking…" : "No Claude Code or Codex session in the focused terminal.");
+      return div().text_size(12).text_color(t.dim).child(this.loading ? "Looking…" : "No Claude Code, Codex or pi session in the focused terminal.");
     }
     const { rec, state } = entry;
     const agent = AGENTS[rec.agent];
@@ -278,9 +278,10 @@ export default class Revive extends View {
     return h_flex().gap(10).items_center().text_size(11)
       .when(s.claude !== null, (el) => el.child(part("Claude Code hooks", s.claude)))
       .when(s.codex !== null, (el) => el.child(part("Codex hooks", s.codex)))
+      .when(s.pi != null, (el) => el.child(part("pi extension", s.pi)))
       .child(part("shell", shellOk))
       .child(div().flex_1())
-      .when(!shellOk || s.claude === false || s.codex === false, (el) => el.child(button(t, "install", this.busy ? "Installing…" : "Install", (_e, cx) => this.install(cx), { kind: "solid", disabled: this.busy })));
+      .when(!shellOk || s.claude === false || s.codex === false || s.pi === false, (el) => el.child(button(t, "install", this.busy ? "Installing…" : "Install", (_e, cx) => this.install(cx), { kind: "solid", disabled: this.busy })));
   }
 
   render(cx) {
