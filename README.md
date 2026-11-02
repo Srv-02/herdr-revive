@@ -80,11 +80,12 @@ Then merge [`keys.json`](keys.json) into `~/.config/herdr-app/keys.json`:
 | `R` | Refresh |
 | Esc | Close |
 
-While developing, link the folder instead of copying it, and Herdr reloads the mod on
-every save:
+While developing, copy the folder again after each change; Herdr reloads the mod within
+a second. Copy, don't symlink: Herdr doesn't reload a symlinked mod folder when its files
+change.
 
 ```sh
-ln -s "$PWD/herdr-revive/mods/revive" ~/.config/herdr-app/mods/revive
+cp -R herdr-revive/mods/revive ~/.config/herdr-app/mods/
 ```
 
 ## Updates
