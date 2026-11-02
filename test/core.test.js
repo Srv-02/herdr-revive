@@ -19,7 +19,11 @@ test("agents are known by their report or their command line", () => {
   assert.equal(agentKey(null, ["/opt/homebrew/bin/claude"]), "claude");
   assert.equal(agentKey(null, ["node", "/usr/local/lib/node_modules/@openai/codex/bin/codex"]), "codex");
   assert.equal(agentKey(null, ["/bin/zsh", "-l"]), null);
-  assert.equal(agentKey("pi", ["pi"]), null);
+  assert.equal(agentKey("pi"), "pi");
+  assert.equal(agentKey(null, ["pi", "--model", "sonnet"]), "pi");
+  assert.equal(agentKey(null, ["/nix/store/x/bin/pi"]), "pi");
+  for (const argv of [["ssh", "pi"], ["vim", "pi"], ["less", "/tmp/pi"]]) assert.equal(agentKey(null, argv), null, argv.join(" "));
+  assert.equal(agentKey("vim", ["vim"]), null);
 });
 
 test("only the launch flags worth keeping are carried, values included", () => {
@@ -31,6 +35,10 @@ test("only the launch flags worth keeping are carried, values included", () => {
   assert.deepEqual(carriedFlags("codex", ["node", "/x/codex", "--no-daemon", "-m", "gpt-5", "--yolo", "task"]), ["--no-daemon", "-m", "gpt-5", "--yolo"]);
   assert.deepEqual(carriedFlags("claude", ["claude", "--model"]), ["--model"]);
   assert.deepEqual(carriedFlags("nope", ["x", "--model", "y"]), []);
+  assert.deepEqual(
+    carriedFlags("pi", ["pi", "--provider", "anthropic", "--model", "sonnet", "--thinking", "high", "-t", "read,bash", "-e", "/x/ext.ts", "--session", "x", "fix it"]),
+    ["--provider", "anthropic", "--model", "sonnet", "--thinking", "high", "-t", "read,bash", "-e", "/x/ext.ts"],
+  );
 });
 
 test("--add-dir keeps every folder it was given", () => {
@@ -68,6 +76,9 @@ test("resume and fork commands per agent", () => {
   assert.deepEqual(command({ agent: "claude", session: ID, flags: [] }, "fork"), ["claude", "--resume", ID, "--fork-session"]);
   assert.deepEqual(command({ agent: "codex", session: ID, flags: ["--no-daemon"] }, "resume"), ["codex", "resume", "--no-daemon", ID]);
   assert.deepEqual(command({ agent: "codex", session: ID, flags: [] }, "fork"), ["codex", "fork", ID]);
+  assert.deepEqual(command({ agent: "pi", session: ID, flags: ["--model", "sonnet"] }, "resume"), ["pi", "--model", "sonnet", "--session", ID]);
+  assert.deepEqual(command({ agent: "pi", session: ID, flags: [] }, "fork"), ["pi", "--fork", ID]);
+  assert.deepEqual(command({ agent: "pi", session: ID, env: { PI_CODING_AGENT_DIR: "/p" } }), ["env", "PI_CODING_AGENT_DIR=/p", "pi", "--session", ID]);
   assert.equal(command({ agent: "claude", session: "x y" }), null);
   assert.equal(command({ agent: "vim", session: ID }), null);
   assert.equal(command(null), null);
@@ -83,7 +94,7 @@ test("shell quoting survives the shell", () => {
 test("labels read back as a record", () => {
   // `ended` from older versions is read past.
   const rec = readRecord(labels({ agent: "claude", session: ID, cwd: "/w", flags: '["--model","opus"]', shell: 41, at: 5, ended: "other" }));
-  assert.deepEqual(rec, { agent: "claude", session: ID, cwd: "/w", flags: ["--model", "opus"], env: {}, shell: 41, since: null, at: 5, resumed: null, failed: null, auto: true });
+  assert.deepEqual(rec, { agent: "claude", session: ID, cwd: "/w", flags: ["--model", "opus"], env: {}, transcript: null, shell: 41, since: null, at: 5, resumed: null, failed: null, auto: true });
   assert.equal(readRecord({}), null);
   assert.equal(readRecord(undefined), null);
   assert.deepEqual(readRecord(labels({ session: ID, flags: "{broken" })).flags, []);
@@ -136,6 +147,11 @@ test("a run that answers and quits is told from a session", () => {
   assert.equal(isOneShot("codex", ["codex", "e", "fix it"]), true);
   assert.equal(isOneShot("codex", ["codex", "-p", "work"]), false, "codex's -p is --profile");
   assert.equal(isOneShot("codex", ["codex", "resume", ID]), false);
+  assert.equal(isOneShot("pi", ["pi", "-p", "hi"]), true);
+  assert.equal(isOneShot("pi", ["pi", "--mode", "json", "hi"]), true);
+  assert.equal(isOneShot("pi", ["pi", "--mode=rpc"]), true);
+  assert.equal(isOneShot("pi", ["pi", "--no-session"]), true, "nothing saved, nothing to bring back");
+  assert.equal(isOneShot("pi", ["pi", "--mode", "text", "--model", "sonnet"]), false);
   assert.equal(isOneShot("vim", ["vim", "-p"]), false);
 });
 

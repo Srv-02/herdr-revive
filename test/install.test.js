@@ -1,13 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, symlinkSync, lstatSync, statSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, symlinkSync, lstatSync, statSync, realpathSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { withHooks, hasHooks, withShellBlock, shellBlock } from "../mods/revive/revive.mjs";
 
 const ENGINE = resolve("mods/revive/revive.mjs");
 const theirs = { type: "command", command: "~/bin/notify.sh" };
+// The test runner's own pi folder must not be installed into.
+delete process.env.PI_CODING_AGENT_DIR;
 
 test("hooks are added beside the person's own, once", () => {
   const before = { model: "opus", hooks: { SessionStart: [{ hooks: [theirs] }], Stop: [{ hooks: [theirs] }] } };
@@ -247,4 +249,42 @@ test("hooks without a herdr terminal do nothing and never fail", () => {
   const out = execFileSync("node", [ENGINE, "hook"], { input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "x" }), env, encoding: "utf8" });
   assert.equal(out, "");
   execFileSync("node", [ENGINE, "hook"], { input: "garbage", env: { ...env, HC_TERMINAL_ID: "t999", REVIVE_HC: "/nonexistent/hc" } });
+});
+
+test("pi's extension is linked where pi loads it, and only that link is taken out", () => {
+  const { home, run } = bareHome();
+  const link = join(home, ".pi", "agent", "extensions", "herdr-revive.ts");
+  assert.equal(JSON.parse(run("doctor")).pi, null, "no pi, nothing to say");
+  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+  assert.match(run("install", "--no-shell", "--no-codex"), /herdr-revive\.ts[\s\S]*next time it starts/);
+  assert.equal(realpathSync(link), realpathSync("mods/revive/pi/revive.ts"));
+  assert.equal(JSON.parse(run("doctor")).pi, true);
+  assert.match(run("install", "--no-shell", "--no-codex"), /Nothing to change/);
+  run("uninstall", "--no-shell");
+  assert.ok(!existsSync(link));
+  assert.equal(JSON.parse(run("doctor")).pi, false);
+});
+
+test("a pi extension placed by something else is left alone", () => {
+  const { home, run } = bareHome();
+  const dir = join(home, ".pi", "agent", "extensions");
+  mkdirSync(dir, { recursive: true });
+  // A package manager's read-only copy (a Nix store path), linked in.
+  const store = join(home, "store-revive.ts");
+  copyFileSync("mods/revive/pi/revive.ts", store);
+  chmodSync(store, 0o444);
+  symlinkSync(store, join(dir, "herdr-revive.ts"));
+  assert.doesNotMatch(run("install", "--no-shell", "--no-codex"), /herdr-revive\.ts/);
+  assert.equal(JSON.parse(run("doctor")).pi, true);
+  run("uninstall", "--no-shell");
+  assert.ok(lstatSync(join(dir, "herdr-revive.ts")).isSymbolicLink(), "uninstall keeps a link it didn't make");
+  // Another file by that name is not Revive's to replace.
+  const other = bareHome();
+  mkdirSync(join(other.home, ".pi", "agent", "extensions"), { recursive: true });
+  writeFileSync(join(other.home, ".pi", "agent", "extensions", "herdr-revive.ts"), "export default () => {};\n");
+  const r = spawnSync("node", [ENGINE, "install", "--bash", "--no-codex"], { encoding: "utf8", env: { ...process.env, HOME: other.home, SHELL: "/bin/bash", CLAUDE_CONFIG_DIR: "", CODEX_HOME: "", ZDOTDIR: "" } });
+  assert.equal(r.status, 0);
+  assert.match(r.stderr, /not Revive's pi extension/);
+  assert.ok(readFileSync(join(other.home, ".bash_profile"), "utf8").includes("herdr-revive"), "the rest is still installed");
+  assert.equal(readFileSync(join(other.home, ".pi", "agent", "extensions", "herdr-revive.ts"), "utf8"), "export default () => {};\n");
 });

@@ -2,22 +2,22 @@
 // Revive's engine. The mod can't run for a terminal while the app is closed or
 // the machine is rebooting, so the work happens where the session lives:
 //
-//   revive.mjs hook               Claude Code / Codex SessionStart and SessionEnd:
-//                                 remember the session on its terminal, or forget it
+//   revive.mjs hook               Claude Code / Codex SessionStart and SessionEnd, and pi's
+//                                 through pi/revive.ts: remember the session on its terminal, or forget it
 //   revive.mjs check --shell PID  from the shell's rc file: print the commands that
 //                                 resume a session lost to a restart, or nothing
 //   revive.mjs failed             the resume printed by `check` gave up at once
 //   revive.mjs list [--focus T]   every remembered session, as JSON, for the dialog
 //   revive.mjs resume T           resume T's session in T's shell
 //   revive.mjs auto T on|off      allow or stop automatic resume for T
-//   revive.mjs install [--zsh] [--bash] [--no-shell] [--no-codex]
+//   revive.mjs install [--zsh] [--bash] [--no-shell] [--no-codex] [--no-pi]
 //   revive.mjs uninstall
 //   revive.mjs doctor             what is installed, as JSON
 //
 // Hooks never fail an agent: every error is swallowed and the exit code is 0.
 
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, writeFileSync, copyFileSync, mkdirSync, renameSync, realpathSync, rmSync, statSync, chmodSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync, copyFileSync, mkdirSync, renameSync, realpathSync, rmSync, statSync, lstatSync, symlinkSync, chmodSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -106,6 +106,7 @@ async function startOf(pid) {
 function agentFromPayload(payload) {
   const path = String(payload.transcript_path ?? "");
   if (path.includes("/.codex/")) return "codex";
+  if (path.includes("/.pi/")) return "pi";
   if (path.includes("/.claude/") || path.includes("/projects/")) return "claude";
   return null;
 }
@@ -129,7 +130,9 @@ async function hook() {
     // The command line: the foreground's (exact words), else the agent
     // process the hook came from, when a wrapper with another name runs it.
     const fgArgv = terminal.foreground?.argv ?? terminal.argv ?? [];
-    const argv = agentKey(null, fgArgv) ? fgArgv : table.get(owner.agent)?.argv ?? fgArgv;
+    // pi renames its process `pi`, which hides its flags: its extension sends its command line.
+    const sent = Array.isArray(payload.argv) ? payload.argv.map(String) : null;
+    const argv = sent && agentKey(null, sent) ? sent : agentKey(null, fgArgv) ? fgArgv : table.get(owner.agent)?.argv ?? fgArgv;
     // The command line first: the terminal's last OSC report may still be a
     // previous agent's, sent before this one reported anything.
     const key = agentKey(null, argv) ?? agentFromPayload(payload) ?? agentKey(terminal.status?.app);
@@ -147,6 +150,8 @@ async function hook() {
       cwd: payload.cwd || terminal.foreground?.cwd || terminal.cwd || "",
       flags: JSON.stringify(carriedFlags(key, argv)),
       env: Object.keys(env).length ? JSON.stringify(env) : null,
+      // pi keeps sessions where its flags, environment or settings say: the file it named is the one to check.
+      transcript: key === "pi" && String(payload.transcript_path ?? "").startsWith("/") ? payload.transcript_path : null,
       shell: terminal.pid ?? "",
       since: table.get(terminal.pid)?.since ?? null,
       at: same ? rec.at ?? Date.now() : Date.now(),
@@ -182,8 +187,10 @@ const claudeDir = (env = process.env) => env.CLAUDE_CONFIG_DIR || join(homedir()
  * searched when the agent moved. Codex is not checked. The folder is the
  * session's own `CLAUDE_CONFIG_DIR` when it was recorded with one, not this
  * shell's. Records from before Revive kept it fall back to this shell's.
+ * pi does the same; its record names the file, which is all there is to check.
  */
 export function hasTranscript(rec) {
+  if (rec.agent === "pi") return !rec.transcript || existsSync(rec.transcript);
   if (rec.agent !== "claude") return true;
   const projects = join(rec.env?.CLAUDE_CONFIG_DIR ? rec.env.CLAUDE_CONFIG_DIR : claudeDir(), "projects");
   const file = `${rec.session}.jsonl`;
@@ -236,6 +243,7 @@ function claudeSessionFor(pid) {
  * and the fork is let through.
  */
 function forkable(rec, fgPid) {
+  if (rec.agent === "pi") return hasTranscript(rec);
   if (rec.agent !== "claude") return true;
   const known = rec.env?.CLAUDE_CONFIG_DIR || (fgPid && claudeSessionFor(fgPid) !== null);
   if (!known) return null;
@@ -316,6 +324,13 @@ const HOOK_COMMAND = `node ${shQuote(ENGINE)} hook`;
 const claudeSettings = () => join(claudeDir(), "settings.json");
 const codexDir = () => process.env.CODEX_HOME || join(homedir(), ".codex");
 const codexHooks = () => join(codexDir(), "hooks.json");
+const piDir = () => process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+// pi has no hooks file: its hooks come from an extension, kept in the mod and
+// linked where pi loads extensions. It finds the engine from its own place.
+const PI_EXTENSION = join(dirname(ENGINE), "pi", "revive.ts");
+const piExtension = () => join(piDir(), "extensions", "herdr-revive.ts");
+// Its first line. A copy placed by something else (a Nix store path) counts too.
+const isPiExtension = (path) => readText(path).includes("herdr-revive: pi extension");
 
 /**
  * Herdr starts terminals as login shells (`zsh -l`, `bash -l`). zsh reads
@@ -503,6 +518,12 @@ function install(args, remove = false) {
       if (saveHooks(codex, { remove, ...CODEX_HOOKS })) changed.push(codex);
     }
   }
+  // A file of someone else's at pi's path: say so, and still install the rest.
+  let piWarning = null;
+  if (!args.includes("--no-pi") && existsSync(piDir())) {
+    try { if (linkPiExtension(remove)) changed.push(piExtension()); }
+    catch (err) { piWarning = err.message; }
+  }
   if (!args.includes("--no-shell")) {
     for (const rc of remove ? ALL_RC() : shells(args).map((s) => RC[s]())) {
       if (remove && !existsSync(rc)) continue;
@@ -511,6 +532,28 @@ function install(args, remove = false) {
   }
   process.stdout.write(changed.length ? `${remove ? "Removed from" : "Updated"}:\n${changed.map((p) => `  ${p}`).join("\n")}\n` : "Nothing to change.\n");
   if (!remove && changed.includes(codexHooks())) process.stdout.write("Codex asks to trust new hooks the next time it starts.\n");
+  if (!remove && changed.includes(piExtension())) process.stdout.write("pi loads the extension the next time it starts (or at /reload).\n");
+  if (piWarning) process.stderr.write(`${piWarning}\n`);
+}
+
+/**
+ * Links pi's extension to the mod's, or, with remove, takes out that link.
+ * An extension already there (this link, or a copy something else manages) is
+ * left alone, and so is anything else by that name: it isn't Revive's to replace.
+ */
+function linkPiExtension(remove) {
+  const target = piExtension();
+  const real = (p) => { try { return realpathSync(p); } catch { return null; } };
+  if (remove) {
+    if (!lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink() || real(target) !== real(PI_EXTENSION)) return false;
+    rmSync(target);
+    return true;
+  }
+  if (isPiExtension(target)) return false;
+  if (lstatSync(target, { throwIfNoEntry: false })) throw new Error(`${target} is not Revive's pi extension; Revive won't replace it.`);
+  mkdirSync(dirname(target), { recursive: true });
+  symlinkSync(PI_EXTENSION, target);
+  return true;
 }
 
 export function doctorReport() {
@@ -519,6 +562,7 @@ export function doctorReport() {
     engine: ENGINE,
     claude: existsSync(claudeDir()) ? safe(() => hasHooks(readJson(claudeSettings()))) : null,
     codex: existsSync(codexDir()) ? safe(() => hasHooks(readJson(codexHooks()))) : null,
+    pi: existsSync(piDir()) ? safe(() => isPiExtension(piExtension())) : null,
     shell: Object.fromEntries(Object.entries(RC).map(([s, rc]) => [s, readText(rc()).includes(BEGIN)])),
   };
 }
