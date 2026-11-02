@@ -33,8 +33,8 @@ const HC = process.env.REVIVE_HC || "hc";
 
 // ── herdr-core ──────────────────────────────────────────────────────────────
 
-async function hc(args) {
-  const { stdout } = await run(HC, args, { maxBuffer: 8 * 1024 * 1024, timeout: 10_000 });
+async function hc(args, env = process.env) {
+  const { stdout } = await run(HC, args, { env, maxBuffer: 8 * 1024 * 1024, timeout: 10_000 });
   return stdout;
 }
 
@@ -299,7 +299,10 @@ async function resume(args) {
     throw new Error("That session never got a message, so there is nothing to resume. Forgot it.");
   }
   await label(t, resumedArgs({ pid: terminal.pid, since: await startOf(terminal.pid) }));
-  await hc(["send", t, line]);
+  // Run from inside a herdr terminal, `hc send` delivers the text as a note from
+  // that terminal (`<hc from="t3">…</hc>`), which the shell can't run.
+  const { HC_TERMINAL_ID: _, ...env } = process.env;
+  await hc(["send", t, line], env);
 }
 
 async function auto(args) {

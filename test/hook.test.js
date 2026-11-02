@@ -268,3 +268,22 @@ test("an agent running with nothing on record is listed with its folder", () => 
   assert.equal(entry.live, "claude");
   assert.equal(entry.folder, "/w");
 });
+
+test("Resume types the command as is, even when run from inside a herdr terminal", () => {
+  // From a terminal, `hc send` would deliver the text as a note (<hc from="t9">…</hc>).
+  const dir = mkdtempSync(join(tmpdir(), "revive-resume-"));
+  const hc = join(dir, "hc");
+  writeFileSync(hc, `#!/usr/bin/env node
+const fs = require("fs");
+const [cmd, t, text] = process.argv.slice(2);
+if (cmd === "get") console.log(JSON.stringify({ address: t, state: "live", pid: 4242, cwd: "/w",
+  labels: { "revive.agent": "codex", "revive.session": ${JSON.stringify(ID)}, "revive.cwd": "/w", "revive.shell": "1" },
+  foreground: { pid: 4242, argv: ["zsh"], cwd: "/w" } }));
+else if (cmd === "send") fs.writeFileSync(${JSON.stringify(join(dir, "sent.json"))}, JSON.stringify({ text, from: process.env.HC_TERMINAL_ID ?? null }));
+`);
+  chmodSync(hc, 0o755);
+  execFileSync("node", [ENGINE, "resume", "t1"], { env: { ...base, REVIVE_HC: hc, HC_TERMINAL_ID: "t9" } });
+  const sent = JSON.parse(readFileSync(join(dir, "sent.json"), "utf8"));
+  assert.equal(sent.text, `cd -- /w && codex resume ${ID}`);
+  assert.equal(sent.from, null);
+});
