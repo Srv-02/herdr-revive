@@ -13,7 +13,7 @@ agent's conversation into a new session beside it.
    `cmd-shift-r` is already bound.
 5. Tell the person what `install` changes and ask before running it:
    `node ~/.config/herdr-app/mods/revive/revive.mjs install`. It edits
-   `~/.claude/settings.json`, `~/.codex/hooks.json` (only if `~/.codex` exists) and the
+   `~/.claude/settings.json` (only if `~/.claude` exists), `~/.codex/hooks.json` (only if `~/.codex` exists) and the
    file their login shell reads (`~/.zshrc`; for bash the first existing of
    `~/.bash_profile`, `~/.bash_login`, `~/.profile`), keeping the original of each as
    `.revive-backup`. If they use both zsh and bash, add `--zsh --bash`.
@@ -55,7 +55,7 @@ agent's conversation into a new session beside it.
     - **OTHER SESSIONS**: the remaining ones, same rows without the fill or **Resume**. Sessions found
       through their pid but not remembered say *not remembered* instead of the toggle.
   - A note line for errors (`ansi1`) or install output (`muted`), on `raised`.
-  - A footer above a `border` line: `✓ Claude Code hooks`, `✓ Codex hooks` (only when
+  - A footer above a `border` line: `✓ Claude Code hooks` (only when Claude Code is installed), `✓ Codex hooks` (only when
     Codex is installed), `✓ shell`, each `muted` with a `ansi2` ✓ when installed and
     `ansi1` with `✕` when not, and a solid **Install** button while anything is missing.
 - The list refreshes every 4 seconds while the dialog is open.

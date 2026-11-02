@@ -271,16 +271,16 @@ export default class Revive extends View {
     const s = this.setup;
     if (!s) return div();
     const shellOk = Object.values(s.shell ?? {}).some(Boolean);
-    const ok = s.claude && shellOk;
+    // Each agent's hooks count only when that agent is installed (null: it isn't).
     const part = (name, on) => h_flex().gap(4).text_color(on ? t.muted : t.ansi1)
       .child(div().text_color(on ? t.ansi2 : t.ansi1).child(on ? "✓" : "✕"))
       .child(name);
     return h_flex().gap(10).items_center().text_size(11)
-      .child(part("Claude Code hooks", s.claude))
+      .when(s.claude !== null, (el) => el.child(part("Claude Code hooks", s.claude)))
       .when(s.codex !== null, (el) => el.child(part("Codex hooks", s.codex)))
       .child(part("shell", shellOk))
       .child(div().flex_1())
-      .when(!ok || s.codex === false, (el) => el.child(button(t, "install", this.busy ? "Installing…" : "Install", (_e, cx) => this.install(cx), { kind: "solid", disabled: this.busy })));
+      .when(!shellOk || s.claude === false || s.codex === false, (el) => el.child(button(t, "install", this.busy ? "Installing…" : "Install", (_e, cx) => this.install(cx), { kind: "solid", disabled: this.busy })));
   }
 
   render(cx) {

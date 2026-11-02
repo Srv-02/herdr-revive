@@ -487,9 +487,12 @@ function saveHooks(path, options) {
 
 function install(args, remove = false) {
   const changed = [];
-  const claude = claudeSettings();
-  if (!remove || existsSync(claude)) {
-    if (saveHooks(claude, { remove })) changed.push(claude);
+  // Like Codex: only when Claude Code is there, so a Codex-only setup gets no ~/.claude.
+  if (existsSync(claudeDir())) {
+    const claude = claudeSettings();
+    if (!remove || existsSync(claude)) {
+      if (saveHooks(claude, { remove })) changed.push(claude);
+    }
   }
   if (!args.includes("--no-codex") && existsSync(codexDir())) {
     const codex = codexHooks();
@@ -511,7 +514,7 @@ export function doctorReport() {
   const safe = (fn) => { try { return fn(); } catch { return false; } };
   return {
     engine: ENGINE,
-    claude: safe(() => hasHooks(readJson(claudeSettings()))),
+    claude: existsSync(claudeDir()) ? safe(() => hasHooks(readJson(claudeSettings()))) : null,
     codex: existsSync(codexDir()) ? safe(() => hasHooks(readJson(codexHooks()))) : null,
     shell: Object.fromEntries(Object.entries(RC).map(([s, rc]) => [s, readText(rc()).includes(BEGIN)])),
   };

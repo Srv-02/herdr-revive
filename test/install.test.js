@@ -133,6 +133,13 @@ test("uninstall creates nothing that wasn't there", () => {
   assert.ok(!existsSync(join(home, ".bash_profile")));
 });
 
+test("without Claude Code, install leaves ~/.claude alone and doctor doesn't ask for its hooks", () => {
+  const { home, run } = bareHome();
+  run("install", "--no-shell");
+  assert.ok(!existsSync(join(home, ".claude")));
+  assert.equal(JSON.parse(run("doctor")).claude, null);
+});
+
 test("bash gets the block in the file a login shell reads", () => {
   const only = bareHome();
   writeFileSync(join(only.home, ".profile"), "export A=1\n");

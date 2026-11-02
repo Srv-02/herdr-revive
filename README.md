@@ -51,7 +51,8 @@ herdr-app check ~/.config/herdr-app/mods/revive
 node ~/.config/herdr-app/mods/revive/revive.mjs install
 ```
 
-`install` adds two hooks (`SessionStart`, `SessionEnd`) to `~/.claude/settings.json`, the
+`install` adds two hooks (`SessionStart`, `SessionEnd`) to `~/.claude/settings.json` when
+Claude Code is installed (`~/.claude` exists), the
 same two to `~/.codex/hooks.json` when Codex is installed, and a short block to the file
 your login shell reads at start: `~/.zshrc` for zsh, and for bash the first of
 `~/.bash_profile`, `~/.bash_login` and `~/.profile` that exists (Herdr starts terminals as
