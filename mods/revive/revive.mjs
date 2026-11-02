@@ -518,7 +518,12 @@ function install(args, remove = false) {
       if (saveHooks(codex, { remove, ...CODEX_HOOKS })) changed.push(codex);
     }
   }
-  if (!args.includes("--no-pi") && existsSync(piDir()) && linkPiExtension(remove)) changed.push(piExtension());
+  // A file of someone else's at pi's path: say so, and still install the rest.
+  let piWarning = null;
+  if (!args.includes("--no-pi") && existsSync(piDir())) {
+    try { if (linkPiExtension(remove)) changed.push(piExtension()); }
+    catch (err) { piWarning = err.message; }
+  }
   if (!args.includes("--no-shell")) {
     for (const rc of remove ? ALL_RC() : shells(args).map((s) => RC[s]())) {
       if (remove && !existsSync(rc)) continue;
@@ -528,6 +533,7 @@ function install(args, remove = false) {
   process.stdout.write(changed.length ? `${remove ? "Removed from" : "Updated"}:\n${changed.map((p) => `  ${p}`).join("\n")}\n` : "Nothing to change.\n");
   if (!remove && changed.includes(codexHooks())) process.stdout.write("Codex asks to trust new hooks the next time it starts.\n");
   if (!remove && changed.includes(piExtension())) process.stdout.write("pi loads the extension the next time it starts (or at /reload).\n");
+  if (piWarning) process.stderr.write(`${piWarning}\n`);
 }
 
 /**

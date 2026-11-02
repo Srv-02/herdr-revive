@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, symlinkSync, lstatSync, statSync, realpathSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -282,5 +282,9 @@ test("a pi extension placed by something else is left alone", () => {
   const other = bareHome();
   mkdirSync(join(other.home, ".pi", "agent", "extensions"), { recursive: true });
   writeFileSync(join(other.home, ".pi", "agent", "extensions", "herdr-revive.ts"), "export default () => {};\n");
-  assert.throws(() => other.run("install", "--no-shell", "--no-codex"), /not Revive's pi extension/);
+  const r = spawnSync("node", [ENGINE, "install", "--bash", "--no-codex"], { encoding: "utf8", env: { ...process.env, HOME: other.home, SHELL: "/bin/bash", CLAUDE_CONFIG_DIR: "", CODEX_HOME: "", ZDOTDIR: "" } });
+  assert.equal(r.status, 0);
+  assert.match(r.stderr, /not Revive's pi extension/);
+  assert.ok(readFileSync(join(other.home, ".bash_profile"), "utf8").includes("herdr-revive"), "the rest is still installed");
+  assert.equal(readFileSync(join(other.home, ".pi", "agent", "extensions", "herdr-revive.ts"), "utf8"), "export default () => {};\n");
 });

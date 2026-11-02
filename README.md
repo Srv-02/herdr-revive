@@ -13,8 +13,9 @@ flags.
 
 ![Revive](preview.png)
 
-Requires the **Herdr desktop app 0.1.9+**, **Node 20+**, and **Claude Code** or
-**[pi](https://pi.dev)**. Codex support is experimental.
+Requires the **Herdr desktop app 0.1.9+**, **Node 20+**, and **Claude Code**. Codex support
+is experimental. [pi](https://pi.dev) support is experimental and community-maintained
+(tested with pi 1.4; pi issues: ping @llehouerou).
 
 ## Features
 
@@ -176,7 +177,9 @@ REVIVE_DEBUG=1 zsh               # say why a shell did or didn't resume
     share the daemon.
   - Codex fires `SessionStart` at a session's first message, so a session is recorded
     only from then.
-- pi is recorded through its extension, only for an interactive pi in a herdr terminal
+- pi support is experimental and community-maintained, tested with pi 1.4.0; a new pi
+  release may change its flags, `--session`/`--fork` or how it ends on a signal. pi is
+  recorded through its extension, only for an interactive pi in a herdr terminal
   (not `-p`, `--mode json|rpc`, `--no-session`, or the subagents pi starts):
   - pi reports `quit` for every end, `/quit` and a reboot alike. The extension tells
     them apart by listening for the SIGTERM and SIGHUP a reboot, a core restart or a

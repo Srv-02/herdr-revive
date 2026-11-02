@@ -25,6 +25,8 @@ export const KEYS = ["agent", "session", "cwd", "flags", "env", "transcript", "s
  * `oneShot` tells a run that answers and quits (`claude -p`, `codex exec`)
  * from an interactive session, given the words after the program's name:
  * such a run has hooks too, and must not replace the session on record.
+ * `argv0Only` recognizes the agent by the first word of a command line only:
+ * a short name like `pi` is often an argument (`ssh pi`, `vim pi`).
  */
 export const AGENTS = {
   claude: {
@@ -73,6 +75,8 @@ export const AGENTS = {
     name: "pi",
     bin: "pi",
     apps: ["pi"],
+    // pi sets its process title to `pi`, so the first word is always its own.
+    argv0Only: true,
     resume: (id, flags) => ["pi", ...flags, "--session", id],
     fork: (id, flags) => ["pi", ...flags, "--fork", id],
     env: ["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"],
@@ -122,9 +126,9 @@ export function agentKey(app, argv = []) {
     if (app && agent.apps.includes(app)) return key;
   }
   // `claude …`, or a script run by its interpreter: `node …/bin/codex …`.
-  for (const word of argv.slice(0, 2)) {
+  for (const [i, word] of argv.slice(0, 2).entries()) {
     for (const [key, agent] of Object.entries(AGENTS)) {
-      if (base(word) === agent.bin) return key;
+      if (base(word) === agent.bin && !(i > 0 && agent.argv0Only)) return key;
     }
   }
   return null;

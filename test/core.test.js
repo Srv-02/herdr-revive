@@ -21,6 +21,8 @@ test("agents are known by their report or their command line", () => {
   assert.equal(agentKey(null, ["/bin/zsh", "-l"]), null);
   assert.equal(agentKey("pi"), "pi");
   assert.equal(agentKey(null, ["pi", "--model", "sonnet"]), "pi");
+  assert.equal(agentKey(null, ["/nix/store/x/bin/pi"]), "pi");
+  for (const argv of [["ssh", "pi"], ["vim", "pi"], ["less", "/tmp/pi"]]) assert.equal(agentKey(null, argv), null, argv.join(" "));
   assert.equal(agentKey("vim", ["vim"]), null);
 });
 
