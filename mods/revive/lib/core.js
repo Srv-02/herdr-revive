@@ -110,9 +110,8 @@ export const AGENTS = {
   // to the next restart. It installs as both `cursor-agent` and `agent`;
   // `agent` is too generic a name, so it counts only under a path that says
   // Cursor (~/.local/share/cursor-agent/versions/…) or with a Cursor report.
-  // It has no fork and no `-m` (only --model). Not checked yet: which
-  // sessionEnd reasons it sends for /exit, Ctrl+C or a shutdown. `--api-key`
-  // and `-H` are never carried: labels are readable by anything that asks hc.
+  // It has no fork and no `-m` (only --model). `--api-key` and `-H` are never
+  // carried: labels are readable by anything that asks hc.
   cursor: {
     name: "Cursor",
     bin: "cursor-agent",
@@ -127,7 +126,10 @@ export const AGENTS = {
     resume: (id, flags) => ["cursor-agent", ...flags, "--resume", id],
     fork: null,
     // completed: the CLI's normal end; user_close: the IDE's. Anything else
-    // (aborted, error, window_close) is kept, to be offered back.
+    // (aborted, error, window_close) is kept, to be offered back. Checked with
+    // cursor-agent 2026.10.22: /exit and Ctrl+C twice send "completed"; SIGTERM
+    // (a shutdown) sends "aborted"; SIGHUP (the terminal closing) sends no
+    // sessionEnd at all, so the record stays, which also means keep.
     end: (reason) => (reason === "completed" || reason === "user_close" ? "forget" : "keep"),
     carry: {
       "-f": 0,

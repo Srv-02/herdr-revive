@@ -147,9 +147,10 @@ REVIVE_DEBUG=1 zsh               # say why a shell did or didn't resume
   and Codex behind a wrapper (npm's `node …/bin/codex`, a launcher script) is recognized,
   but Revive can't check whether a Codex session can be resumed before trying.
 - Droid (1.1.0) and the Cursor CLI (2026.10.22) were checked by hand: the hooks record the
-  session and flags, and resume (and Droid's fork) reopen the conversation. Not checked
-  yet: which `sessionEnd` reasons Cursor sends for `/exit`, Ctrl+C or a shutdown, and a
-  real reboot with either. Like Codex, neither is checked for a resumable session before
+  session and flags, and resume (and Droid's fork) reopen the conversation. Cursor
+  sends `completed` for `/exit` and Ctrl+C twice (forgotten), `aborted` when it is killed
+  with SIGTERM (kept), and no `sessionEnd` at all when its terminal closes (kept). Not
+  checked yet: a real reboot with either. Like Codex, neither is checked for a resumable session before
   trying: a failed resume is marked *Resume failed*.
 - Cursor installs as `cursor-agent` and `agent`. `agent` is a common name, so it counts as
   Cursor only under a path that says so (`…/cursor-agent/…`) or when it reports itself as
