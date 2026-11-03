@@ -20,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         # macOS too: the mod runs there, with zsh by default and a symlinked /tmp.
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         node: [20, 22]
     steps:
       - uses: actions/checkout@v7

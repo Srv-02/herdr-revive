@@ -9,13 +9,13 @@
 
 export const PREFIX = "revive.";
 // `ended` is no longer written; it stays here so clearing removes it from older records.
-export const KEYS = ["agent", "session", "cwd", "flags", "shell", "since", "at", "ended", "resumed", "failed", "auto"];
+export const KEYS = ["agent", "session", "cwd", "flags", "env", "transcript", "shell", "since", "at", "ended", "resumed", "failed", "auto"];
 
 /**
  * How an agent's SessionEnd reason is taken: "ignore" (the same process starts
  * another session at once, and its SessionStart records it), "keep" (a signal,
  * a crash: worth bringing back) or "forget" (the person ended it).
- * Claude Code's reasons, which Codex and Factory Droid share.
+ * Claude Code's reasons, which Codex, Factory Droid and pi's extension share.
  */
 const claudeEnd = (reason) => (reason === "clear" || reason === "resume" ? "ignore" : reason === "other" ? "keep" : "forget");
 
@@ -30,7 +30,7 @@ const claudeEnd = (reason) => (reason === "clear" || reason === "resume" ? "igno
  * - `resume`   the command line that resumes a session
  * - `fork`     the one that copies it into a new session, or null when the
  *              agent can't (the dialog then offers no fork)
- * - `end`      how its SessionEnd reasons are taken (see claudeEnd)
+ * - `end`      how its SessionEnd reasons are taken (default: claudeEnd)
  * - `carry`    the launch flags a resume or fork keeps, so a session that ran
  *              with `--dangerously-skip-permissions` or another model comes
  *              back the way it was: 0 for a switch, 1 for a flag that takes a
@@ -39,6 +39,15 @@ const claudeEnd = (reason) => (reason === "clear" || reason === "resume" ? "igno
  *              `--resume` itself, a secret) is left behind.
  * The engine (revive.mjs) has the other half: where each agent's hooks are
  * installed, and lib/sessions.js how to find a session nobody recorded.
+ *
+ * `env` lists the variables that say where the agent keeps its sessions: a
+ * session started under `CLAUDE_CONFIG_DIR=~/.claude-work` is found, and
+ * resumed, only under that same folder, so the hook records them with it.
+ * `oneShot` tells a run that answers and quits (`claude -p`, `codex exec`)
+ * from an interactive session, given the words after the program's name:
+ * such a run has hooks too, and must not replace the session on record.
+ * `argv0Only` recognizes the agent by the first word of a command line only:
+ * a short name like `pi` is often an argument (`ssh pi`, `vim pi`).
  */
 export const AGENTS = {
   claude: {
@@ -48,6 +57,8 @@ export const AGENTS = {
     resume: (id, flags) => ["claude", ...flags, "--resume", id],
     fork: (id, flags) => ["claude", ...flags, "--resume", id, "--fork-session"],
     end: claudeEnd,
+    env: ["CLAUDE_CONFIG_DIR"],
+    oneShot: (args) => args.some((w) => w === "-p" || w === "--print"),
     carry: {
       "--dangerously-skip-permissions": 0,
       "--allow-dangerously-skip-permissions": 0,
@@ -65,6 +76,8 @@ export const AGENTS = {
     resume: (id, flags) => ["codex", "resume", ...flags, id],
     fork: (id, flags) => ["codex", "fork", ...flags, id],
     end: claudeEnd,
+    env: ["CODEX_HOME"],
+    oneShot: (args) => args[0] === "exec" || args[0] === "e",
     carry: {
       "--no-daemon": 0,
       "--dangerously-bypass-approvals-and-sandbox": 0,
@@ -81,6 +94,50 @@ export const AGENTS = {
       "--profile": 1,
     },
   },
+  pi: {
+    name: "pi",
+    bin: "pi",
+    apps: ["pi"],
+    // pi sets its process title to `pi`, so the first word is always its own.
+    argv0Only: true,
+    resume: (id, flags) => ["pi", ...flags, "--session", id],
+    fork: (id, flags) => ["pi", ...flags, "--fork", id],
+    env: ["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"],
+    oneShot: (args) => args.some((w, i) => w === "-p" || w === "--print" || w === "--no-session"
+      || /^--mode=(json|rpc)$/.test(w) || (w === "--mode" && /^(json|rpc)$/.test(args[i + 1] ?? ""))),
+    carry: {
+      "--provider": 1,
+      "--model": 1,
+      "--models": 1,
+      "--thinking": 1,
+      "-t": 1,
+      "--tools": 1,
+      "-xt": 1,
+      "--exclude-tools": 1,
+      "-nt": 0,
+      "--no-tools": 0,
+      "-nbt": 0,
+      "--no-builtin-tools": 0,
+      "-e": 1,
+      "--extension": 1,
+      "-ne": 0,
+      "--no-extensions": 0,
+      "--no-mcp": 0,
+      "--skill": 1,
+      "-ns": 0,
+      "--no-skills": 0,
+      "-nc": 0,
+      "--no-context-files": 0,
+      "--system-prompt": 1,
+      "--append-system-prompt": 1,
+      "--session-dir": 1,
+      "-a": 0,
+      "--approve": 0,
+      "-na": 0,
+      "--no-approve": 0,
+      "--offline": 0,
+    },
+  },
   // Factory Droid, checked against droid 1.1.0: `--resume <id>` reopens the
   // same session id; `--fork <id>` opens an interactive copy under a new id; it
   // reports itself to Herdr as `droid`. Only interactive flags are carried:
@@ -94,6 +151,7 @@ export const AGENTS = {
     resume: (id, flags) => ["droid", ...flags, "--resume", id],
     fork: (id, flags) => ["droid", ...flags, "--fork", id],
     end: claudeEnd,
+    oneShot: (args) => args[0] === "exec",
     carry: {
       "--auto": 1,
       "--settings": 1,
@@ -131,6 +189,7 @@ export const AGENTS = {
     // (a shutdown) sends "aborted"; SIGHUP (the terminal closing) sends no
     // sessionEnd at all, so the record stays, which also means keep.
     end: (reason) => (reason === "completed" || reason === "user_close" ? "forget" : "keep"),
+    oneShot: (args) => args.some((w) => w === "-p" || w === "--print"),
     carry: {
       "-f": 0,
       "--force": 0,
@@ -158,9 +217,9 @@ export function agentKey(app, argv = []) {
     if (app && agent.apps.includes(app)) return key;
   }
   // `claude …`, or a script run by its interpreter: `node …/bin/codex …`.
-  for (const word of argv.slice(0, 2)) {
+  for (const [i, word] of argv.slice(0, 2).entries()) {
     for (const [key, agent] of Object.entries(AGENTS)) {
-      if (isBin(agent, word)) return key;
+      if (isBin(agent, word) && !(i > 0 && agent.argv0Only)) return key;
     }
   }
   return null;
@@ -173,10 +232,11 @@ export const canFork = (key) => typeof AGENTS[key]?.fork === "function";
 export const endAction = (key, reason) => (AGENTS[key]?.end ?? claudeEnd)(reason);
 
 /**
- * A hook's input, the same for every agent. Claude Code, Codex and Droid send
- * `SessionStart` with `session_id` and `cwd`; Cursor sends `sessionStart` with
- * `conversation_id` and `workspace_roots`. `agent` is what the payload itself
- * says (its transcript path, Cursor's version field), or null.
+ * A hook's input, the same for every agent. Claude Code, Codex, Droid and
+ * pi's extension send `SessionStart` with `session_id` and `cwd`; Cursor sends
+ * `sessionStart` with `conversation_id` and `workspace_roots`. `agent` is what
+ * the payload itself says (its transcript path, Cursor's version field), or
+ * null. `argv` is the command line pi's extension sends, or null.
  */
 export function hookPayload(payload) {
   const p = payload && typeof payload === "object" ? payload : {};
@@ -187,6 +247,8 @@ export function hookPayload(payload) {
     session: p.session_id ?? p.conversation_id ?? null,
     cwd: p.cwd || roots[0] || null,
     reason: p.reason ?? null,
+    transcript: typeof p.transcript_path === "string" ? p.transcript_path : null,
+    argv: Array.isArray(p.argv) ? p.argv.map(String) : null,
     agent: payloadAgent(p),
   };
 }
@@ -194,10 +256,29 @@ export function hookPayload(payload) {
 function payloadAgent(p) {
   const path = String(p.transcript_path ?? "");
   if (path.includes("/.codex/")) return "codex";
+  if (path.includes("/.pi/")) return "pi";
   if (path.includes("/.factory/")) return "droid";
   if (path.includes("/.cursor/") || p.cursor_version !== undefined) return "cursor";
   if (path.includes("/.claude/") || path.includes("/projects/")) return "claude";
   return null;
+}
+
+/** Where the agent's own words start: after its program's name, else after the first word. */
+const argsStart = (key, argv) => {
+  const start = argv.findIndex((word) => isBin(AGENTS[key], word));
+  return start < 0 ? 1 : start + 1;
+};
+
+/** Whether a command line runs the agent once, without a session to bring back. */
+export function isOneShot(key, argv = []) {
+  const agent = AGENTS[key];
+  return Boolean(agent?.oneShot?.(argv.slice(argsStart(key, argv)).map(String)));
+}
+
+/** The agent's `env` variables that are set in `env`, as an object (empty when none). */
+export function agentEnv(key, env = {}) {
+  const names = AGENTS[key]?.env ?? [];
+  return Object.fromEntries(names.filter((n) => typeof env[n] === "string" && env[n] !== "").map((n) => [n, env[n]]));
 }
 
 /** The launch flags worth keeping, in their original order. */
@@ -205,8 +286,7 @@ export function carriedFlags(key, argv = []) {
   const carry = AGENTS[key]?.carry;
   if (!carry) return [];
   const out = [];
-  const start = argv.findIndex((word) => isBin(AGENTS[key], word));
-  for (let i = start < 0 ? 1 : start + 1; i < argv.length; i++) {
+  for (let i = argsStart(key, argv); i < argv.length; i++) {
     const word = argv[i];
     const eq = word.indexOf("=");
     if (word.startsWith("--") && eq > 0 && own(carry, word.slice(0, eq)) && carry[word.slice(0, eq)] >= 1) { out.push(word); continue; }
@@ -249,11 +329,16 @@ export const validId = (id) => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9
 
 export const shortId = (id) => (id ? String(id).slice(0, 8) : "");
 
-/** The command line that resumes or forks a session. */
+/**
+ * The command line that resumes or forks a session. A session recorded with
+ * its agent's variables (`CLAUDE_CONFIG_DIR`) gets them back through `env`.
+ */
 export function command(rec, kind = "resume") {
   const agent = AGENTS[rec?.agent];
   if (!agent || typeof agent[kind] !== "function" || !validId(rec.session)) return null;
-  return agent[kind](rec.session, rec.flags ?? []);
+  const argv = agent[kind](rec.session, rec.flags ?? []);
+  const vars = Object.entries(agentEnv(rec.agent, rec.env ?? {}));
+  return vars.length ? ["env", ...vars.map(([k, v]) => `${k}=${v}`), ...argv] : argv;
 }
 
 /** One word for a POSIX shell, quoted only when it needs to be. */
@@ -276,11 +361,19 @@ export function readRecord(labels) {
     const parsed = JSON.parse(get("flags") || "[]");
     if (Array.isArray(parsed)) flags = parsed.map(String);
   } catch { /* a hand-edited label: carry nothing */ }
+  let env = {};
+  try {
+    const parsed = JSON.parse(get("env") || "{}");
+    // Only the variables the agent declares: a label must not set LD_PRELOAD.
+    if (parsed && typeof parsed === "object") env = agentEnv(get("agent"), parsed);
+  } catch { /* a hand-edited label: no variables */ }
   return {
     agent: get("agent") || null,
     session,
     cwd: get("cwd") || null,
     flags,
+    env,
+    transcript: get("transcript") || null,
     shell: num(get("shell")),
     since: get("since") || null,
     at: num(get("at")),
@@ -345,6 +438,10 @@ export function shouldResume(rec, { pid, since = null, shellPid, env = {} }) {
   if (pid === null || shellPid !== pid) return { go: false, why: "not the terminal's own shell" };
   if (env.REVIVE_AUTO === "0") return { go: false, why: "REVIVE_AUTO=0" };
   if (!rec.auto) return { go: false, why: "turned off for this terminal" };
+  // It was tried after the last restart and the agent gave up at once (its
+  // folder is gone, the session can't be found): trying at every restart would
+  // fail the same way. The dialog still offers it by hand.
+  if (rec.failed) return { go: false, why: "the last resume failed" };
   if (sameShell(rec, { pid, since })) return { go: false, why: "same shell as before" };
   return { go: true, why: "the terminal's program was replaced" };
 }

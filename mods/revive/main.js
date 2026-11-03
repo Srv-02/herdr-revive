@@ -8,19 +8,45 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, run, theme, focused, appHome, props, closeOverlay, notify } from "herdr";
+import { exec, run, theme, focused, appHome, home, props, closeOverlay, notify } from "herdr";
 import { AGENTS, canFork, command, shortId, ago, shJoin } from "./lib/core.js";
 
 const ENGINE = () => `${appHome()}/mods/revive/revive.mjs`;
 const REFRESH_MS = 4000;
+// The dialog grows with its content up to this share of the window; past it, the sessions scroll.
+const MAX_SHARE = 0.85;
+// Room kept for the padding, the header and the footer; a note takes NOTE_H more.
+const CHROME_H = 130;
+const NOTE_H = 56;
+
+/**
+ * The tallest the sessions may be, in pixels, so the whole dialog fits the
+ * window, or null when the window's size isn't known. A dialog sized by its
+ * content can't shrink a part of itself, so the part gets a height of its own.
+ */
+function listMaxH(withNote) {
+  let height = null;
+  try { height = window.viewport_size()?.height; } catch { /* no window yet */ }
+  if (!Number.isFinite(height) || height <= 0) return null;
+  return Math.max(160, Math.floor(height * MAX_SHARE) - CHROME_H - (withNote ? NOTE_H : 0));
+}
+
+/** A folder the way a shell prompt shows it: the home folder as `~`. */
+function tilde(path) {
+  const h = home();
+  if (!path || !h) return path;
+  return path === h ? "~" : path.startsWith(h + "/") ? "~" + path.slice(h.length) : path;
+}
 
 const STATE = {
-  running: { word: "Running", color: (t) => t.working },
-  lost: { word: "Lost to a restart", color: (t) => t.blocked },
-  interrupted: { word: "Interrupted", color: (t) => t.blocked },
+  running: { word: "Running", color: (t) => t.ansi2 },
+  lost: { word: "Lost to a restart", color: (t) => t.ansi3 },
+  interrupted: { word: "Interrupted", color: (t) => t.ansi3 },
   failed: { word: "Resume failed", color: (t) => t.ansi1 },
 };
 const NEEDS_YOU = new Set(["lost", "interrupted", "failed"]);
+// Claude Code and pi write a session down only once it has a message; until then a resume finds nothing.
+const NO_MESSAGE = "This session has no message yet, so there is nothing to fork. Send it one first.";
 
 async function engine(args) {
   let r;
@@ -44,7 +70,7 @@ function button(t, id, label, onClick, { kind = "outline", hint = null, disabled
     .when(Boolean(hint), (el) => el.child(div().text_size(10.5).text_color(solid ? t.solid_foreground : t.dim).opacity(0.7).child(hint)));
 }
 
-const heading = (t, text) => div().mt(14).mb(6).text_size(10.5).text_color(t.dim).child(text);
+const heading = (t, text) => div().mt(16).mb(8).text_size(10.5).font_medium().text_color(t.dim).child(text);
 
 function badge(t, state) {
   const s = STATE[state];
@@ -108,6 +134,7 @@ export default class Revive extends View {
   current() { return this.entries.find((e) => e.address === this.focus) ?? null; }
 
   fork(entry, place) {
+    if (entry?.forkable === false) return;
     const argv = command(entry?.rec, "fork");
     if (!argv) return;
     this.close();
@@ -170,6 +197,7 @@ export default class Revive extends View {
     if (this.focus?.includes("/")) {
       return div().text_size(12).text_color(t.dim).child("The focused terminal is on another machine. Revive works on this computer for now.");
     }
+    if (!entry?.rec && AGENTS[entry?.live]) return this.unrecordedCard(t, entry);
     if (!entry?.rec) {
       return div().text_size(12).text_color(t.dim).child(this.loading ? "Looking…" : "No agent session in the focused terminal.");
     }
@@ -177,38 +205,63 @@ export default class Revive extends View {
     const agent = AGENTS[rec.agent];
     const running = state === "running";
     const forks = canFork(rec.agent);
+    const empty = running && entry.forkable === false;
     const flags = rec.flags?.length ? shJoin(rec.flags) : null;
-    return v_flex().gap(10).p(12).rounded(10).bg(t.raised)
+    return v_flex().gap(12).p(14).rounded(12).bg(t.raised).border_1().border_color(t.border)
       .child(h_flex().gap(8).items_center()
-        .child(div().text_size(13).font_semibold().text_color(t.foreground).child(agent?.name ?? rec.agent))
+        .child(div().text_size(14).font_semibold().text_color(t.foreground).child(agent?.name ?? rec.agent))
         .child(div().text_size(11.5).text_color(t.dim).font_family("JetBrains Mono").child(shortId(rec.session)))
         .child(div().flex_1())
         .child(badge(t, state)))
-      .child(v_flex().gap(2).text_size(11.5).text_color(t.muted)
-        .when(Boolean(rec.cwd), (el) => el.child(div().truncate().child(rec.cwd)))
+      .child(v_flex().gap(4).text_size(12).text_color(t.muted)
+        .when(Boolean(rec.cwd), (el) => el.child(div().truncate().child(tilde(rec.cwd))))
         .when(Boolean(flags), (el) => el.child(div().truncate().text_color(t.dim).font_family("JetBrains Mono").text_size(10.5).child(flags)))
         .when(Boolean(entry.unrecorded), (el) => el.child(div().text_color(t.dim).child(forks
           ? "Started before Revive was installed: it can be forked, but won't come back by itself."
           : "Started before Revive was installed: it won't come back by itself.")))
-        .when(running && !forks, (el) => el.child(div().text_color(t.dim).child(`${agent?.name ?? rec.agent} can't fork a session.`))))
+        .when(running && !forks, (el) => el.child(div().text_color(t.dim).child(`${agent?.name ?? rec.agent} can't fork a session.`)))
+        .when(forks && empty, (el) => el.child(div().text_color(t.dim).child(NO_MESSAGE))))
       .child(h_flex().gap(6).flex_wrap()
         .when(running && forks, (el) => el
-          .child(button(t, "fork-right", "Fork right", () => this.fork(entry, "right"), { hint: "F" }))
-          .child(button(t, "fork-down", "Fork below", () => this.fork(entry, "down"), { hint: "D" }))
-          .child(button(t, "fork-tab", "Fork to a tab", () => this.fork(entry, "tab"), { hint: "T" })))
+          .child(button(t, "fork-right", "Fork right", () => this.fork(entry, "right"), { hint: "F", disabled: empty }))
+          .child(button(t, "fork-down", "Fork below", () => this.fork(entry, "down"), { hint: "D", disabled: empty }))
+          .child(button(t, "fork-tab", "Fork to a tab", () => this.fork(entry, "tab"), { hint: "T", disabled: empty })))
         .when(NEEDS_YOU.has(state), (el) => el
           .child(button(t, "resume-here", this.busy ? "Resuming…" : "Resume", (_e, cx) => this.resume(entry, cx), { kind: "solid", hint: "↵", disabled: this.busy }))));
+  }
+
+  /**
+   * An agent running in the focused terminal that Revive has no record of. A
+   * Codex session is recorded at its first message, and never while Codex's
+   * shared background server runs it: that server, not the terminal, runs the
+   * hooks, so they can't tell which terminal the session is in.
+   */
+  unrecordedCard(t, entry) {
+    const agent = AGENTS[entry.live];
+    const why = entry.live === "codex"
+      ? "Revive has no record of this session, so it can't be forked or brought back. Codex records it at its first message, and not at all while its shared background server runs it (daemon_auto_start)."
+      : "Revive has no record of this session, so it can't be forked or brought back. It is recorded when it starts once Revive is installed.";
+    return v_flex().gap(12).p(14).rounded(12).bg(t.raised).border_1().border_color(t.border)
+      .child(h_flex().gap(8).items_center()
+        .child(div().text_size(14).font_semibold().text_color(t.foreground).child(agent.name))
+        .child(div().flex_1())
+        .child(badge(t, "running")))
+      .child(v_flex().gap(4).text_size(12).text_color(t.muted)
+        .when(Boolean(entry.folder), (el) => el.child(div().truncate().child(tilde(entry.folder))))
+        .child(div().text_color(t.dim).child(why)));
   }
 
   row(t, entry, i) {
     const { rec, state } = entry;
     const agent = AGENTS[rec.agent];
     const needs = NEEDS_YOU.has(state);
-    return h_flex().id(`row-${i}`).h(40).px(8).gap(10).items_center().rounded(8).cursor_pointer().hover((s) => s.bg(t.hover))
+    return h_flex().id(`row-${i}`).h(48).px(12).gap(12).items_center().rounded(10).cursor_pointer()
+      .when(needs, (el) => el.bg(t.raised))
+      .hover((s) => s.bg(t.hover))
       .on_click(() => { this.close(); run("pane.focus", { terminal: entry.address }); })
       .child(v_flex().flex_1().min_w(0)
         .child(h_flex().gap(6).items_center()
-          .child(div().text_size(12.5).text_color(t.foreground).child(agent?.name ?? rec.agent))
+          .child(div().text_size(13).font_medium().text_color(t.foreground).child(agent?.name ?? rec.agent))
           .child(div().text_size(11).text_color(t.dim).font_family("JetBrains Mono").child(shortId(rec.session))))
         .child(div().truncate().text_size(11).text_color(t.dim)
           .child([entry.where ?? entry.address, rec.resumed ? `resumed ${ago(rec.resumed)}` : null].filter(Boolean).join(" · "))))
@@ -225,9 +278,12 @@ export default class Revive extends View {
     // One entry per agent: true, false, or null when that agent isn't installed.
     const agents = Object.keys(AGENTS).filter((k) => s[k] !== null && s[k] !== undefined);
     const ok = shellOk && agents.every((k) => s[k]);
-    const part = (name, on) => div().text_color(on ? t.muted : t.blocked).child(`${on ? "✓" : "✕"} ${name}`);
+    const part = (name, on) => h_flex().gap(4).text_color(on ? t.muted : t.ansi1)
+      .child(div().text_color(on ? t.ansi2 : t.ansi1).child(on ? "✓" : "✕"))
+      .child(name);
     return h_flex().gap(10).items_center().text_size(11)
-      .children(agents.map((k) => part(`${AGENTS[k].name} hooks`, s[k])))
+      // pi's hooks come from an extension, not a hooks file.
+      .children(agents.map((k) => part(k === "pi" ? "pi extension" : `${AGENTS[k].name} hooks`, s[k])))
       .child(part("shell", shellOk))
       .child(div().flex_1())
       .when(!ok, (el) => el.child(button(t, "install", this.busy ? "Installing…" : "Install", (_e, cx) => this.install(cx), { kind: "solid", disabled: this.busy })));
@@ -238,18 +294,19 @@ export default class Revive extends View {
     const others = this.entries.filter((e) => e.rec && e.address !== this.focus);
     const needs = others.filter((e) => NEEDS_YOU.has(e.state));
     const rest = others.filter((e) => !NEEDS_YOU.has(e.state));
+    const listH = listMaxH(Boolean(this.note));
     return v_flex().id("revive").track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
-      .size_full().bg(t.popover).p(18)
-      .child(h_flex().items_center().gap(8)
-        .child(div().text_size(15).font_semibold().text_color(t.foreground).child("↻ Revive"))
+      .w_full().bg(t.popover).px(20).pt(18).pb(16)
+      .child(h_flex().flex_none().items_center().gap(8)
+        .child(div().text_size(16).font_semibold().text_color(t.foreground).child("↻ Revive"))
         .child(div().text_size(11.5).text_color(t.dim).child("Agent sessions, remembered on their terminals")))
-      .child(div().id("revive-scroll").flex_1().min_h(0).overflow_y_scrollbar()
+      .child(div().id("revive-scroll").when(listH !== null, (el) => el.max_h(listH)).overflow_y_scrollbar()
         .child(heading(t, "FOCUSED TERMINAL"))
         .child(this.focusedCard(t))
-        .when(needs.length > 0, (el) => el.child(heading(t, "NEED YOU")).children(needs.map((e, i) => this.row(t, e, `n${i}`))))
-        .when(rest.length > 0, (el) => el.child(heading(t, "OTHER SESSIONS")).children(rest.map((e, i) => this.row(t, e, `r${i}`)))))
-      .when(Boolean(this.note), (el) => el.child(div().mt(8).p(8).rounded(6).bg(t.raised).text_size(11.5)
+        .when(needs.length > 0, (el) => el.child(heading(t, "NEED YOU")).child(v_flex().gap(4).children(needs.map((e, i) => this.row(t, e, `n${i}`)))))
+        .when(rest.length > 0, (el) => el.child(heading(t, "OTHER SESSIONS")).child(v_flex().gap(4).children(rest.map((e, i) => this.row(t, e, `r${i}`))))))
+      .when(Boolean(this.note), (el) => el.child(div().flex_none().mt(8).p(8).rounded(6).bg(t.raised).text_size(11.5)
         .text_color(this.note.level === "error" ? t.ansi1 : t.muted).child(this.note.text)))
-      .child(div().mt(10).pt(10).border_t_1().border_color(t.border).child(this.setupLine(t)));
+      .child(div().flex_none().mt(16).pt(12).border_t_1().border_color(t.border).child(this.setupLine(t)));
   }
 }

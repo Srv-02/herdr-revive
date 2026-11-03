@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { agentKey, carriedFlags, command, canFork, hookPayload, endAction } from "../mods/revive/lib/core.js";
+import { agentKey, carriedFlags, command, canFork, hookPayload, endAction, isOneShot } from "../mods/revive/lib/core.js";
 
 const ID = "5f1d6a52-8c39-4a0e-9b0d-2a7c1e9f0b11";
 
@@ -83,18 +83,22 @@ test("hook payloads read the same for every agent", () => {
   // Claude Code, Codex and Droid: Claude's format.
   assert.deepEqual(
     hookPayload({ hook_event_name: "SessionStart", session_id: ID, cwd: "/w", transcript_path: "/Users/me/.factory/projects/-w/x.jsonl", source: "startup" }),
-    { event: "SessionStart", session: ID, cwd: "/w", reason: null, agent: "droid" },
+    { event: "SessionStart", session: ID, cwd: "/w", reason: null, transcript: "/Users/me/.factory/projects/-w/x.jsonl", argv: null, agent: "droid" },
   );
   assert.equal(hookPayload({ hook_event_name: "SessionStart", session_id: ID, transcript_path: "/Users/me/.claude/projects/-w/x.jsonl" }).agent, "claude");
   assert.equal(hookPayload({ hook_event_name: "SessionStart", session_id: ID, transcript_path: "/Users/me/.codex/sessions/x.jsonl" }).agent, "codex");
+  // pi's extension: Claude's format, plus its command line.
+  const pi = hookPayload({ hook_event_name: "SessionStart", session_id: ID, transcript_path: "/Users/me/.pi/agent/sessions/x.jsonl", argv: ["pi", "--model", "m"] });
+  assert.equal(pi.agent, "pi");
+  assert.deepEqual(pi.argv, ["pi", "--model", "m"]);
   // Cursor: camelCase events, the chat as conversation_id, the folder as workspace_roots.
   assert.deepEqual(
     hookPayload({ hook_event_name: "sessionStart", conversation_id: ID, generation_id: ID, workspace_roots: ["/w"], cursor_version: "2026.10.1", transcript_path: null }),
-    { event: "SessionStart", session: ID, cwd: "/w", reason: null, agent: "cursor" },
+    { event: "SessionStart", session: ID, cwd: "/w", reason: null, transcript: null, argv: null, agent: "cursor" },
   );
   assert.deepEqual(
     hookPayload({ hook_event_name: "sessionEnd", session_id: ID, conversation_id: ID, reason: "completed", cursor_version: "x" }),
-    { event: "SessionEnd", session: ID, cwd: null, reason: "completed", agent: "cursor" },
+    { event: "SessionEnd", session: ID, cwd: null, reason: "completed", transcript: null, argv: null, agent: "cursor" },
   );
   assert.equal(hookPayload({}).session, null);
   assert.equal(hookPayload(null).event, null);
@@ -114,4 +118,12 @@ test("how each agent's SessionEnd reasons are taken", () => {
   assert.equal(endAction("cursor", "error"), "keep");
   assert.equal(endAction("cursor", "window_close"), "keep");
   assert.equal(endAction("cursor", undefined), "keep");
+});
+
+test("droid exec and cursor-agent -p answer and quit: no session to bring back", () => {
+  assert.equal(isOneShot("droid", ["droid", "exec", "fix it"]), true);
+  assert.equal(isOneShot("droid", ["droid", "--auto", "high"]), false);
+  assert.equal(isOneShot("cursor", ["cursor-agent", "-p", "fix it"]), true);
+  assert.equal(isOneShot("cursor", ["cursor-agent", "--print", "fix it"]), true);
+  assert.equal(isOneShot("cursor", ["cursor-agent", "--force"]), false);
 });

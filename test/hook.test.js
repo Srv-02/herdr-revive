@@ -8,14 +8,14 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { parseProcesses } from "../mods/revive/revive.mjs";
+import { parseProcesses, hasTranscript } from "../mods/revive/revive.mjs";
 import { hookOwner } from "../mods/revive/lib/core.js";
 
 const ENGINE = resolve("mods/revive/revive.mjs");
 const ID = "0c8b28eb-1111-4222-8333-444455556666";
 
 /** A fake `hc`: `get` answers from state.json, `label` appends to labels.log. */
-function setup({ labels = {}, app = null, argv = ["claude", "--model", "opus", "fix it"], bin: name0 = "claude" } = {}) {
+function setup({ labels = {}, app = null, argv = ["claude", "--model", "opus", "fix it"], bin = "claude" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "revive-hook-"));
   writeFileSync(join(dir, "state.json"), JSON.stringify({ labels, app, argv }));
   const hc = join(dir, "hc");
@@ -36,17 +36,17 @@ if (cmd === "get") {
   // either the hook or, through a shell the way an agent's tool call does,
   // another agent (a \`claude -p\` used as a tool).
   const agent = (name) => {
-    const bin = join(dir, name, name0);
+    const path = join(dir, name, bin);
     mkdirSync(join(dir, name));
-    writeFileSync(bin, `#!/bin/sh\n[ -z "$FAKE_FG" ] && export FAKE_FG=$$\nif [ -n "$NESTED" ]; then NESTED= sh -c "\\"$NESTED\\"; true"; else node ${JSON.stringify(ENGINE)} hook; fi\n`);
-    chmodSync(bin, 0o755);
-    return bin;
+    writeFileSync(path, `#!/bin/sh\n[ -z "$FAKE_FG" ] && export FAKE_FG=$$\nif [ -n "$NESTED" ]; then NESTED= sh -c "\\"$NESTED\\"; true"; else node ${JSON.stringify(ENGINE)} hook; fi\n`);
+    chmodSync(path, 0o755);
+    return path;
   };
   const outer = agent("outer");
   const inner = agent("inner");
-  const run = (payload, { nested = false } = {}) => execFileSync(outer, [], {
+  const run = (payload, { nested = false, env = {} } = {}) => execFileSync(outer, [], {
     input: JSON.stringify(payload),
-    env: { ...process.env, HC_TERMINAL_ID: "t1", REVIVE_HC: hc, NESTED: nested ? inner : "", FAKE_FG: "" },
+    env: { ...base, HC_TERMINAL_ID: "t1", REVIVE_HC: hc, NESTED: nested ? inner : "", FAKE_FG: "", ...env },
   });
   const calls = () => (existsSync(join(dir, "labels.log")) ? readFileSync(join(dir, "labels.log"), "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []);
   const set = (calls) => Object.fromEntries(calls.flat().map((a) => [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]));
@@ -55,6 +55,13 @@ if (cmd === "get") {
 
 const start = { hook_event_name: "SessionStart", session_id: ID, cwd: "/w", source: "startup" };
 const end = (reason) => ({ hook_event_name: "SessionEnd", session_id: ID, reason });
+// The test runner's own CLAUDE_CONFIG_DIR / CODEX_HOME must not leak into records.
+const base = { ...process.env };
+delete base.CLAUDE_CONFIG_DIR;
+delete base.CODEX_HOME;
+delete base.PI_CODING_AGENT_DIR;
+delete base.PI_CODING_AGENT_SESSION_DIR;
+
 const remembered = { "revive.agent": "claude", "revive.session": ID, "revive.shell": "4242" };
 
 test("the foreground agent's SessionStart is remembered, with its flags", () => {
@@ -71,6 +78,31 @@ test("a `claude -p` the agent runs as a tool records nothing", () => {
   const { run, calls } = setup();
   run(start, { nested: true });
   assert.deepEqual(calls(), []);
+});
+
+test("a `claude -p` typed in the terminal records nothing", () => {
+  const { run, calls } = setup({ argv: ["claude", "-p", "summarize this"] });
+  run(start);
+  run(end("other"));
+  assert.deepEqual(calls(), []);
+});
+
+test("a `claude -p` typed in the terminal leaves the remembered session alone", () => {
+  const { run, calls } = setup({ labels: remembered, argv: ["claude", "-p", "summarize this"] });
+  run({ ...start, session_id: "11111111-2222-4333-8444-555566667777" });
+  assert.deepEqual(calls(), []);
+});
+
+test("the session's config folder is remembered with it", () => {
+  const { run, calls, set } = setup();
+  run(start, { env: { CLAUDE_CONFIG_DIR: "/h/.claude-work", CODEX_HOME: "/c" } });
+  assert.equal(set(calls())["revive.env"], '{"CLAUDE_CONFIG_DIR":"/h/.claude-work"}');
+});
+
+test("a session without a config folder clears an older one's", () => {
+  const { run, calls, set } = setup({ labels: { ...remembered, "revive.env": '{"CLAUDE_CONFIG_DIR":"/old"}' } });
+  run(start);
+  assert.equal(set(calls())["revive.env"], "");
 });
 
 test("the command line wins over a previous agent's report", () => {
@@ -170,6 +202,112 @@ test("a new session starts without a resumed mark", () => {
   const got = set(calls());
   assert.equal(got["revive.session"], ID);
   assert.equal(got["revive.resumed"], "");
+});
+
+test("a transcript is looked for in the session's own config folder", () => {
+  const work = mkdtempSync(join(tmpdir(), "revive-config-"));
+  mkdirSync(join(work, "projects", "-w"), { recursive: true });
+  writeFileSync(join(work, "projects", "-w", `${ID}.jsonl`), "{}\n");
+  const rec = { agent: "claude", session: ID, cwd: "/w", env: { CLAUDE_CONFIG_DIR: work } };
+  assert.equal(hasTranscript(rec), true);
+  assert.equal(hasTranscript({ ...rec, env: { CLAUDE_CONFIG_DIR: mkdtempSync(join(tmpdir(), "revive-empty-")) } }), false);
+});
+
+test("pi's flags and session file come from its extension, since ps shows only `pi`", () => {
+  const { run, calls, set } = setup({ argv: ["pi"], bin: "pi", app: "pi" });
+  const file = "/h/.pi/agent/sessions/--w--/2026-11-02T10-00-00-000Z_" + ID + ".jsonl";
+  run({ ...start, transcript_path: file, argv: ["pi", "--model", "sonnet", "--thinking", "high", "fix it"] }, { env: { PI_CODING_AGENT_DIR: "/h/.pi-work" } });
+  const got = set(calls());
+  assert.equal(got["revive.agent"], "pi");
+  assert.equal(got["revive.flags"], '["--model","sonnet","--thinking","high"]');
+  assert.equal(got["revive.transcript"], file);
+  assert.equal(got["revive.env"], '{"PI_CODING_AGENT_DIR":"/h/.pi-work"}');
+});
+
+test("a pi session is resumable once its file exists", () => {
+  const dir = mkdtempSync(join(tmpdir(), "revive-pi-"));
+  const rec = { agent: "pi", session: ID, cwd: "/w", transcript: join(dir, `x_${ID}.jsonl`) };
+  assert.equal(hasTranscript(rec), false);
+  writeFileSync(rec.transcript, "{}\n");
+  assert.equal(hasTranscript(rec), true);
+  assert.equal(hasTranscript({ ...rec, transcript: null }), true, "no file named: unknown, let pi try");
+});
+
+/** A fake `hc` with one live terminal running claude, for `revive.mjs list`. */
+function listSetup(labels) {
+  const dir = mkdtempSync(join(tmpdir(), "revive-list-"));
+  const hc = join(dir, "hc");
+  writeFileSync(hc, `#!/usr/bin/env node
+const [cmd, t] = process.argv.slice(2);
+if (cmd === "ls") console.log(JSON.stringify({ terminals: [{ address: "t1" }, { address: "t2" }] }));
+else if (cmd === "get") console.log(JSON.stringify({ address: t, state: "live", pid: 4242, cwd: "/w",
+  labels: ${JSON.stringify(labels)},
+  foreground: { pid: 4243, argv: ["claude"], cwd: "/w" } }));
+`);
+  chmodSync(hc, 0o755);
+  const config = join(dir, "config");
+  const list = (env = {}) => JSON.parse(execFileSync("node", [ENGINE, "list", "--focus", "t1"], {
+    env: { ...base, REVIVE_HC: hc, CLAUDE_CONFIG_DIR: config, ...env },
+  })).entries;
+  const transcript = (folder = config) => {
+    mkdirSync(join(folder, "projects", "-w"), { recursive: true });
+    writeFileSync(join(folder, "projects", "-w", `${ID}.jsonl`), "{}\n");
+  };
+  return { config, list, transcript };
+}
+
+test("the focused session can be forked only once it has a transcript", () => {
+  const { config, list, transcript } = listSetup({ ...remembered, "revive.cwd": "/w" });
+  // The agent's own sessions/<pid>.json proves the engine looks in its folder.
+  mkdirSync(join(config, "sessions"), { recursive: true });
+  writeFileSync(join(config, "sessions", "4243.json"), JSON.stringify({ sessionId: ID }));
+  assert.equal(list()[0].forkable, false);
+  transcript();
+  assert.equal(list()[0].forkable, true);
+  // Only the focused terminal is checked.
+  assert.equal(list()[1].forkable, undefined);
+});
+
+test("a fork isn't blocked when the session's config folder isn't known", () => {
+  // A record without env, and no sessions/<pid>.json here: the agent may keep
+  // its sessions in a folder this process doesn't know about.
+  const { list } = listSetup({ ...remembered, "revive.cwd": "/w" });
+  assert.equal(list()[0].forkable, null);
+});
+
+test("a record's own config folder settles whether it can be forked", () => {
+  const own = mkdtempSync(join(tmpdir(), "revive-own-"));
+  const { list, transcript } = listSetup({ ...remembered, "revive.cwd": "/w", "revive.env": JSON.stringify({ CLAUDE_CONFIG_DIR: own }) });
+  assert.equal(list()[0].forkable, false);
+  transcript(own);
+  assert.equal(list()[0].forkable, true);
+});
+
+test("an agent running with nothing on record is listed with its folder", () => {
+  const { list } = listSetup({});
+  const entry = list()[0];
+  assert.equal(entry.rec, null);
+  assert.equal(entry.live, "claude");
+  assert.equal(entry.folder, "/w");
+});
+
+test("Resume types the command as is, even when run from inside a herdr terminal", () => {
+  // From a terminal, `hc send` would deliver the text as a note (<hc from="t9">…</hc>).
+  const dir = mkdtempSync(join(tmpdir(), "revive-resume-"));
+  const hc = join(dir, "hc");
+  writeFileSync(hc, `#!/usr/bin/env node
+const fs = require("fs");
+const [cmd, t, text] = process.argv.slice(2);
+if (cmd === "get") console.log(JSON.stringify({ address: t, state: "live", pid: 4242, cwd: "/w",
+  labels: { "revive.agent": "codex", "revive.session": ${JSON.stringify(ID)}, "revive.cwd": "/w", "revive.shell": "1" },
+  foreground: { pid: 4242, argv: ["zsh"], cwd: "/w" } }));
+else if (cmd === "send") fs.writeFileSync(${JSON.stringify(join(dir, "sent.json"))}, JSON.stringify({ text, from: process.env.HC_TERMINAL_ID ?? null }));
+`);
+  chmodSync(hc, 0o755);
+  execFileSync("node", [ENGINE, "resume", "t1"], { env: { ...base, REVIVE_HC: hc, HC_TERMINAL_ID: "t9" } });
+  const sent = JSON.parse(readFileSync(join(dir, "sent.json"), "utf8"));
+  assert.equal(sent.text, `cd -- /w && codex resume ${ID}`);
+  assert.equal(sent.from, null);
 });
 
 // ── Factory Droid and Cursor ────────────────────────────────────────────────
