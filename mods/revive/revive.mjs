@@ -88,8 +88,10 @@ export function parseProcesses(text) {
   return table;
 }
 
+// One -o per column: procps-ng 3.3 (Amazon Linux 2) reads "pid=,ppid=,..." as a
+// single pid column titled ",ppid=,...", which leaves ppid and argv empty.
 async function processes(pids = null) {
-  const args = pids ? ["-o", "pid=,ppid=,lstart=,args=", "-p", pids.join(",")] : ["-A", "-o", "pid=,ppid=,lstart=,args="];
+  const args = pids ? ["-o", "pid=", "-o", "ppid=", "-o", "lstart=", "-o", "args=", "-p", pids.join(",")] : ["-A", "-o", "pid=", "-o", "ppid=", "-o", "lstart=", "-o", "args="];
   try {
     const { stdout } = await run("ps", args, { maxBuffer: 16 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } });
     return parseProcesses(stdout);
