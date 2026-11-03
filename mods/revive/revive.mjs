@@ -291,6 +291,14 @@ const factoryDir = () => agentDirs({ ...process.env, HOME: homedir() }).factory;
 const cursorDir = () => agentDirs({ ...process.env, HOME: homedir() }).cursor;
 
 /**
+ * Whether a CLI is installed: on PATH, or in ~/.local/bin, where the Droid and
+ * cursor-agent installers put it. The Herdr app may run Revive with a shorter
+ * PATH than the person's shell has, hence the fallback.
+ */
+const hasCli = (bin) => [...(process.env.PATH ?? "").split(":").filter(Boolean), join(homedir(), ".local", "bin")]
+  .some((dir) => existsSync(join(dir, bin)));
+
+/**
  * Herdr starts terminals as login shells (`zsh -l`, `bash -l`). zsh reads
  * .zshrc either way; a login bash reads the first of .bash_profile,
  * .bash_login and .profile, and not .bashrc. Creating .bash_profile where
@@ -420,20 +428,30 @@ export const hasCursorHooks = (doc) => CURSOR_EVENTS.every((e) => (doc?.hooks?.[
  * Where each agent's hooks are installed. `files` lists every file they may
  * be in; `target` is the one the agent reads now (Droid reads settings.json's
  * `hooks` only while there is no hooks.json). `optional` agents are installed
- * only when their folder exists, and skipped with their `--no-…` flag.
+ * only when `present` (their CLI is there, not just their folder: Cursor's IDE
+ * makes ~/.cursor and reads its hooks.json too), and skipped with their
+ * `--no-…` flag.
  */
 const HOOK_TARGETS = {
   claude: { dir: claudeDir, files: () => [claudeSettings()], edit: (d, o) => withHooks(d, o), has: hasHooks },
-  codex: { dir: codexDir, optional: "--no-codex", trust: true, files: () => [codexHooks()], edit: (d, o) => withHooks(d, { ...o, matcher: true }), has: hasHooks },
+  codex: { dir: codexDir, present: () => existsSync(codexDir()), optional: "--no-codex", trust: true, files: () => [codexHooks()], edit: (d, o) => withHooks(d, { ...o, matcher: true }), has: hasHooks },
   droid: {
     dir: factoryDir,
+    present: () => existsSync(factoryDir()) && hasCli("droid"),
     optional: "--no-droid",
     files: () => [join(factoryDir(), "hooks.json"), join(factoryDir(), "settings.json")],
     target: (files) => (existsSync(files[0]) ? files[0] : files[1]),
     edit: (d, o, file) => (file.endsWith("hooks.json") ? withBareHooks(d, { ...o, agent: "droid" }) : withHooks(d, { ...o, agent: "droid" })),
     has: (d, file) => (file.endsWith("hooks.json") ? hasBareHooks(d) : hasHooks(d)),
   },
-  cursor: { dir: cursorDir, optional: "--no-cursor", files: () => [join(cursorDir(), "hooks.json")], edit: (d, o) => withCursorHooks(d, o), has: hasCursorHooks },
+  cursor: {
+    dir: cursorDir,
+    present: () => hasCli("cursor-agent") || existsSync(join(homedir(), ".local", "share", "cursor-agent")),
+    optional: "--no-cursor",
+    files: () => [join(cursorDir(), "hooks.json")],
+    edit: (d, o) => withCursorHooks(d, o),
+    has: hasCursorHooks,
+  },
 };
 const targetOf = (h) => (h.target ?? ((files) => files[0]))(h.files());
 
@@ -450,8 +468,17 @@ function readJson(path) {
   const text = readFileSync(path, "utf8");
   if (!text.trim()) return {};
   try { return JSON.parse(text); }
-  catch { throw new Error(`${path} is not valid JSON; fix it first, Revive won't overwrite it.`); }
+  catch { throw new InvalidJson(path); }
 }
+
+class InvalidJson extends Error {
+  constructor(path) {
+    super(`${path} is not valid JSON; fix it first, Revive won't overwrite it.`);
+    this.path = path;
+  }
+}
+
+const tilde = (path) => (path.startsWith(`${homedir()}/`) ? `~${path.slice(homedir().length)}` : path);
 
 /**
  * Writes a file atomically. The first time Revive changes it, the person's
@@ -489,18 +516,26 @@ function shells(args) {
 function install(args, remove = false) {
   const changed = [];
   const trust = [];
+  const skipped = [];
   for (const [key, h] of Object.entries(HOOK_TARGETS)) {
-    if (h.optional && (args.includes(h.optional) || !existsSync(h.dir()))) continue;
+    // Uninstall still cleans an agent whose CLI is gone, as long as its folder is there.
+    if (h.optional && (args.includes(h.optional) || !(remove ? existsSync(h.dir()) : h.present()))) continue;
     const target = targetOf(h);
-    for (const file of h.files()) {
-      // Install into the file the agent reads; take Revive out of every other.
-      // A file without Revive in it is left as it is, formatting and all.
-      const off = remove || file !== target;
-      if (off && !readText(file).includes("revive.mjs")) continue;
-      if (save(file, JSON.stringify(h.edit(readJson(file), { remove: off }, file), null, 2) + "\n")) {
-        changed.push(file);
-        if (!off && h.trust) trust.push(AGENTS[key].name);
+    try {
+      for (const file of h.files()) {
+        // Install into the file the agent reads; take Revive out of every other.
+        // A file without Revive in it is left as it is, formatting and all.
+        const off = remove || file !== target;
+        if (off && !readText(file).includes("revive.mjs")) continue;
+        if (save(file, JSON.stringify(h.edit(readJson(file), { remove: off }, file), null, 2) + "\n")) {
+          changed.push(file);
+          if (!off && h.trust) trust.push(AGENTS[key].name);
+        }
       }
+    } catch (err) {
+      // One unreadable file skips that agent only; the others and the shell go on.
+      if (!(err instanceof InvalidJson)) throw err;
+      skipped.push(`Skipped ${AGENTS[key].name}: ${tilde(err.path)} is not valid JSON; fix it and run ${remove ? "uninstall" : "install"} again.`);
     }
   }
   if (!args.includes("--no-shell")) {
@@ -511,13 +546,15 @@ function install(args, remove = false) {
   }
   process.stdout.write(changed.length ? `${remove ? "Removed from" : "Updated"}:\n${changed.map((p) => `  ${p}`).join("\n")}\n` : "Nothing to change.\n");
   for (const name of trust) process.stdout.write(`${name} asks to trust new hooks the next time it starts.\n`);
+  // On stdout, beside what did change: the dialog shows that output as its note.
+  for (const line of skipped) process.stdout.write(`${line}\n`);
 }
 
 export function doctorReport() {
   const safe = (fn) => { try { return fn(); } catch { return false; } };
   // Per agent: true or false, or null for an optional agent that isn't installed.
   const hooks = Object.fromEntries(Object.entries(HOOK_TARGETS).map(([key, h]) => {
-    if (h.optional && !existsSync(h.dir())) return [key, null];
+    if (h.optional && !h.present()) return [key, null];
     const file = targetOf(h);
     return [key, safe(() => h.has(readJson(file), file))];
   }));

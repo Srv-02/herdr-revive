@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, symlinkSync, lstatSync, statSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, symlinkSync, lstatSync, statSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { withHooks, hasHooks, withShellBlock, shellBlock, withCursorHooks, hasCursorHooks } from "../mods/revive/revive.mjs";
@@ -199,7 +199,8 @@ test("a settings file that isn't JSON is left alone", () => {
   writeFileSync(join(home, ".claude", "settings.json"), "{ not json");
   const env = { ...process.env, HOME: home, SHELL: "/bin/zsh" };
   delete env.CLAUDE_CONFIG_DIR; delete env.ZDOTDIR;
-  assert.throws(() => execFileSync("node", [ENGINE, "install", "--no-shell"], { env, stdio: "pipe" }), /not valid JSON/);
+  const out = execFileSync("node", [ENGINE, "install", "--no-shell"], { env, encoding: "utf8" });
+  assert.match(out, /Skipped Claude Code: ~\/\.claude\/settings\.json is not valid JSON/);
   assert.equal(readFileSync(join(home, ".claude", "settings.json"), "utf8"), "{ not json");
 });
 
@@ -212,16 +213,30 @@ test("hooks without a herdr terminal do nothing and never fail", () => {
 
 // ── Factory Droid and Cursor ────────────────────────────────────────────────
 
-const agentsHome = ({ factory = true, cursor = true } = {}) => {
+// A fake executable named `name` in `dir`.
+const fakeCli = (dir, name) => {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, name), "#!/bin/sh\n");
+  chmodSync(join(dir, name), 0o755);
+};
+
+// A temporary home. `factory` and `cursor` make the agents' folders; `droid`
+// and `cursorAgent` put their CLIs on a PATH that has nothing else of the
+// machine's, so a real droid or cursor-agent can't leak in.
+const agentsHome = ({ factory = true, cursor = true, droid = factory, cursorAgent = cursor } = {}) => {
   const home = mkdtempSync(join(tmpdir(), "revive-home-"));
+  const bin = join(home, "bin");
   mkdirSync(join(home, ".claude"));
+  mkdirSync(bin);
   if (factory) mkdirSync(join(home, ".factory"));
   if (cursor) mkdirSync(join(home, ".cursor"));
-  const env = { ...process.env, HOME: home, SHELL: "/bin/zsh", ZDOTDIR: home };
+  if (droid) fakeCli(bin, "droid");
+  if (cursorAgent) fakeCli(bin, "cursor-agent");
+  const env = { ...process.env, HOME: home, SHELL: "/bin/zsh", ZDOTDIR: home, PATH: `${bin}:/usr/bin:/bin` };
   delete env.CLAUDE_CONFIG_DIR; delete env.CODEX_HOME;
-  const run = (...args) => execFileSync("node", [ENGINE, ...args], { encoding: "utf8", env });
+  const run = (...args) => execFileSync(process.execPath, [ENGINE, ...args], { encoding: "utf8", env });
   const json = (...p) => JSON.parse(readFileSync(join(home, ...p), "utf8"));
-  return { home, run, json };
+  return { home, bin, run, json };
 };
 
 test("Cursor hooks are added beside the person's own, once, and removed whole", () => {
@@ -323,4 +338,59 @@ test("uninstall leaves a settings file without Revive in it untouched, formattin
   run("uninstall");
   assert.equal(readFileSync(join(home, ".claude", "settings.json"), "utf8"), text);
   assert.equal(readFileSync(join(home, ".cursor", "hooks.json"), "utf8"), text);
+});
+
+test("Cursor's hooks are left out when only the Cursor IDE is installed", () => {
+  const { home, run } = agentsHome({ factory: false, cursorAgent: false });
+  run("install", "--no-shell");
+  assert.ok(!existsSync(join(home, ".cursor", "hooks.json")), "the IDE reads this file too");
+  assert.equal(JSON.parse(run("doctor")).cursor, null, "not installed, so the dialog shows no ✕");
+});
+
+test("cursor-agent counts as installed under ~/.local/share/cursor-agent, off PATH", () => {
+  const { home, run } = agentsHome({ factory: false, cursorAgent: false });
+  mkdirSync(join(home, ".local", "share", "cursor-agent"), { recursive: true });
+  run("install", "--no-shell");
+  assert.ok(hasCursorHooks(JSON.parse(readFileSync(join(home, ".cursor", "hooks.json"), "utf8"))));
+});
+
+test("droid's hooks are left out while the droid CLI isn't installed", () => {
+  const { home, run } = agentsHome({ cursor: false, droid: false });
+  run("install", "--no-shell");
+  assert.ok(!existsSync(join(home, ".factory", "settings.json")));
+  assert.equal(JSON.parse(run("doctor")).droid, null);
+});
+
+test("a CLI in ~/.local/bin counts even when PATH doesn't have it", () => {
+  const { home, run, json } = agentsHome({ cursor: false, droid: false });
+  fakeCli(join(home, ".local", "bin"), "droid");
+  run("install", "--no-shell");
+  assert.ok(hasHooks(json(".factory", "settings.json")));
+});
+
+test("uninstall still cleans an agent whose CLI is gone", () => {
+  const { home, bin, run, json } = agentsHome({ factory: false });
+  run("install", "--no-shell");
+  rmSync(join(bin, "cursor-agent"));
+  run("uninstall");
+  assert.deepEqual(json(".cursor", "hooks.json"), { version: 1 });
+});
+
+test("an agent file that isn't valid JSON skips that agent only", () => {
+  const { home, run, json } = agentsHome();
+  const settings = join(home, ".factory", "settings.json");
+  const broken = '{ // half-edited\n  "model": "x",\n';
+  writeFileSync(settings, broken);
+  const out = run("install");
+  assert.match(out, /Skipped Droid: ~\/\.factory\/settings\.json is not valid JSON; fix it and run install again\./);
+  assert.equal(readFileSync(settings, "utf8"), broken, "never overwritten");
+  assert.ok(!existsSync(`${settings}.revive-backup`));
+  assert.ok(hasHooks(json(".claude", "settings.json")), "agents before it are installed");
+  assert.ok(hasCursorHooks(json(".cursor", "hooks.json")), "agents after it are installed");
+  assert.ok(readFileSync(join(home, ".zshrc"), "utf8").includes("revive"), "the shell block is installed");
+  const doctor = JSON.parse(run("doctor"));
+  assert.equal(doctor.droid, false);
+  assert.equal(doctor.cursor, true);
+  assert.doesNotMatch(run("uninstall"), /Skipped/, "nothing of Revive's in it, so it isn't even read");
+  assert.equal(readFileSync(settings, "utf8"), broken);
 });

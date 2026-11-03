@@ -27,8 +27,9 @@ export function agentDirs(env = process.env) {
  * The folder an agent keeps one working folder's sessions in, or null.
  * - droid:  ~/.factory/sessions/<cwd, every non-alphanumeric a dash>/<id>.jsonl
  * - cursor: ~/.cursor/chats/<md5 of the cwd>/<chat id>/store.db
- * Both layouts are read off installed copies of those CLIs, not from their
- * docs, and were not checked on the machine this was written on: unverified.
+ * Neither layout is documented: both were read off installed copies of those
+ * CLIs, and checked by hand on macOS with droid 1.1.0 and cursor-agent
+ * 2026.10.22, against sessions those versions wrote. Other versions may differ.
  */
 export function sessionDir(key, dirs, cwd) {
   if (!cwd) return null;

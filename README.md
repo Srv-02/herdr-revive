@@ -59,10 +59,12 @@ node ~/.config/herdr-app/mods/revive/revive.mjs install
 
 `install` adds two hooks (`SessionStart`, `SessionEnd`) to `~/.claude/settings.json`, the
 same two to `~/.codex/hooks.json` when Codex is installed (`~/.codex` exists), to Droid's
-hooks when `~/.factory` exists (`~/.factory/hooks.json` if you have one, else the `hooks` key
-of `~/.factory/settings.json`, since Droid reads that one only while there is no
-`hooks.json`), and `sessionStart`/`sessionEnd` to `~/.cursor/hooks.json` when `~/.cursor`
-exists. Droid's and Cursor's hooks run `revive.mjs hook --agent droid|cursor`. It also adds a
+hooks when the `droid` CLI is installed (`~/.factory/hooks.json` if you have one, else the
+`hooks` key of `~/.factory/settings.json`, since Droid reads that one only while there is no
+`hooks.json`), and `sessionStart`/`sessionEnd` to `~/.cursor/hooks.json` when the
+`cursor-agent` CLI is installed. A CLI counts as installed when it is on `PATH` or in
+`~/.local/bin` (cursor-agent also under `~/.local/share/cursor-agent`); a `~/.cursor` folder
+alone doesn't count, since the Cursor editor makes one and reads that `hooks.json` too. Droid's and Cursor's hooks run `revive.mjs hook --agent droid|cursor`. It also adds a
 short block to the file
 your login shell reads at start: `~/.zshrc` for zsh, and for bash the first of
 `~/.bash_profile`, `~/.bash_login` and `~/.profile` that exists (Herdr starts terminals as
@@ -74,7 +76,8 @@ copy. Running it again
 changes nothing, so it is also how you update the shell block after updating Revive. The
 **Install** button in the dialog does the same. Codex asks you to trust new hooks the next
 time it starts; Droid warns that its hooks changed and shows them in `/hooks`. `--no-codex`,
-`--no-droid` and `--no-cursor` leave that agent's files alone.
+`--no-droid` and `--no-cursor` leave that agent's files alone. If an agent's file isn't valid
+JSON, that agent is skipped with a note, the file is left as it is, and the rest is installed.
 
 ```sh
 node ~/.config/herdr-app/mods/revive/revive.mjs install --zsh --bash   # both shells
