@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, symlinkSync, lstatSync, statSync, realpathSync, copyFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, symlinkSync, lstatSync, statSync, realpathSync, copyFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { withHooks, hasHooks, withShellBlock, shellBlock } from "../mods/revive/revive.mjs";
+import { withHooks, hasHooks, withShellBlock, shellBlock, withCursorHooks, hasCursorHooks } from "../mods/revive/revive.mjs";
 
 const ENGINE = resolve("mods/revive/revive.mjs");
 const theirs = { type: "command", command: "~/bin/notify.sh" };
@@ -240,7 +240,8 @@ test("a settings file that isn't JSON is left alone", () => {
   writeFileSync(join(home, ".claude", "settings.json"), "{ not json");
   const env = { ...process.env, HOME: home, SHELL: "/bin/zsh" };
   delete env.CLAUDE_CONFIG_DIR; delete env.ZDOTDIR;
-  assert.throws(() => execFileSync("node", [ENGINE, "install", "--no-shell"], { env, stdio: "pipe" }), /not valid JSON/);
+  const out = execFileSync("node", [ENGINE, "install", "--no-shell"], { env, encoding: "utf8" });
+  assert.match(out, /Skipped Claude Code: ~\/\.claude\/settings\.json is not valid JSON/);
   assert.equal(readFileSync(join(home, ".claude", "settings.json"), "utf8"), "{ not json");
 });
 
@@ -287,4 +288,188 @@ test("a pi extension placed by something else is left alone", () => {
   assert.match(r.stderr, /not Revive's pi extension/);
   assert.ok(readFileSync(join(other.home, ".bash_profile"), "utf8").includes("herdr-revive"), "the rest is still installed");
   assert.equal(readFileSync(join(other.home, ".pi", "agent", "extensions", "herdr-revive.ts"), "utf8"), "export default () => {};\n");
+});
+
+// ── Factory Droid and Cursor ────────────────────────────────────────────────
+
+// A fake executable named `name` in `dir`.
+const fakeCli = (dir, name) => {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, name), "#!/bin/sh\n");
+  chmodSync(join(dir, name), 0o755);
+};
+
+// A temporary home. `factory` and `cursor` make the agents' folders; `droid`
+// and `cursorAgent` put their CLIs on a PATH that has nothing else of the
+// machine's, so a real droid or cursor-agent can't leak in.
+const agentsHome = ({ factory = true, cursor = true, droid = factory, cursorAgent = cursor } = {}) => {
+  const home = mkdtempSync(join(tmpdir(), "revive-home-"));
+  const bin = join(home, "bin");
+  mkdirSync(join(home, ".claude"));
+  mkdirSync(bin);
+  if (factory) mkdirSync(join(home, ".factory"));
+  if (cursor) mkdirSync(join(home, ".cursor"));
+  if (droid) fakeCli(bin, "droid");
+  if (cursorAgent) fakeCli(bin, "cursor-agent");
+  const env = { ...process.env, HOME: home, SHELL: "/bin/zsh", ZDOTDIR: home, PATH: `${bin}:/usr/bin:/bin` };
+  delete env.CLAUDE_CONFIG_DIR; delete env.CODEX_HOME;
+  const run = (...args) => execFileSync(process.execPath, [ENGINE, ...args], { encoding: "utf8", env });
+  const json = (...p) => JSON.parse(readFileSync(join(home, ...p), "utf8"));
+  return { home, bin, run, json };
+};
+
+test("Cursor hooks are added beside the person's own, once, and removed whole", () => {
+  const before = { version: 1, hooks: { sessionStart: [{ command: "./mine.sh" }], afterFileEdit: [{ command: "fmt" }] } };
+  const once = withCursorHooks(before);
+  assert.deepEqual(withCursorHooks(once), once, "installing again changes nothing");
+  assert.ok(hasCursorHooks(once));
+  assert.deepEqual(once.hooks.sessionStart[0], { command: "./mine.sh" });
+  assert.equal(once.hooks.sessionStart.length, 2);
+  assert.match(once.hooks.sessionEnd[0].command, /revive\.mjs.* hook --agent cursor$/);
+  assert.deepEqual(once.hooks.afterFileEdit, before.hooks.afterFileEdit);
+  assert.deepEqual(withCursorHooks(once, { remove: true }), before);
+  assert.deepEqual(withCursorHooks(withCursorHooks({}), { remove: true }), { version: 1 });
+  assert.equal(withCursorHooks({}).version, 1, "a new file gets the version Cursor requires");
+  assert.ok(!hasCursorHooks({}));
+});
+
+test("droid's hooks go into ~/.factory/settings.json when there is no hooks.json", () => {
+  const { home, run, json } = agentsHome({ cursor: false });
+  const settings = join(home, ".factory", "settings.json");
+  writeFileSync(settings, JSON.stringify({ model: "x", hooks: { Stop: [{ hooks: [theirs] }] } }));
+  run("install", "--no-shell");
+  const got = json(".factory", "settings.json");
+  assert.equal(got.model, "x");
+  assert.deepEqual(got.hooks.Stop, [{ hooks: [theirs] }]);
+  assert.match(got.hooks.SessionStart[0].hooks[0].command, /hook --agent droid$/);
+  assert.match(got.hooks.SessionEnd[0].hooks[0].command, /hook --agent droid$/);
+  assert.ok(!existsSync(join(home, ".factory", "hooks.json")), "no hooks.json created: it would hide settings.json's hooks");
+  assert.ok(!existsSync(join(home, ".cursor")), "no Cursor folder created");
+  const doctor = JSON.parse(run("doctor"));
+  assert.equal(doctor.droid, true);
+  assert.equal(doctor.cursor, null);
+  assert.match(run("install", "--no-shell"), /Nothing to change/);
+  run("uninstall");
+  assert.deepEqual(json(".factory", "settings.json"), { model: "x", hooks: { Stop: [{ hooks: [theirs] }] } });
+  assert.equal(JSON.parse(run("doctor")).droid, false);
+});
+
+test("droid's hooks go into ~/.factory/hooks.json when it exists, keyed by event", () => {
+  const { home, run, json } = agentsHome({ cursor: false });
+  writeFileSync(join(home, ".factory", "hooks.json"), JSON.stringify({ PreToolUse: [{ matcher: "Execute", hooks: [theirs] }] }));
+  writeFileSync(join(home, ".factory", "settings.json"), JSON.stringify({ model: "x" }));
+  run("install", "--no-shell");
+  const hooks = json(".factory", "hooks.json");
+  assert.deepEqual(hooks.PreToolUse, [{ matcher: "Execute", hooks: [theirs] }]);
+  assert.equal(hooks.hooks, undefined, "no wrapper in a standalone hooks.json");
+  assert.match(hooks.SessionStart[0].hooks[0].command, /hook --agent droid$/);
+  assert.deepEqual(json(".factory", "settings.json"), { model: "x" }, "settings.json untouched");
+  assert.equal(JSON.parse(run("doctor")).droid, true);
+  run("uninstall");
+  assert.deepEqual(json(".factory", "hooks.json"), { PreToolUse: [{ matcher: "Execute", hooks: [theirs] }] });
+});
+
+test("Cursor's hooks go into ~/.cursor/hooks.json, and out again", () => {
+  const { home, run, json } = agentsHome({ factory: false });
+  run("install", "--no-shell");
+  const got = json(".cursor", "hooks.json");
+  assert.equal(got.version, 1);
+  assert.match(got.hooks.sessionStart[0].command, /hook --agent cursor$/);
+  assert.match(got.hooks.sessionEnd[0].command, /hook --agent cursor$/);
+  assert.ok(!existsSync(join(home, ".factory")));
+  assert.equal(JSON.parse(run("doctor")).cursor, true);
+  assert.match(run("install", "--no-shell"), /Nothing to change/);
+  run("uninstall");
+  assert.deepEqual(json(".cursor", "hooks.json"), { version: 1 });
+  assert.equal(JSON.parse(run("doctor")).cursor, false);
+});
+
+test("--no-droid and --no-cursor leave those agents alone", () => {
+  const { home, run } = agentsHome();
+  run("install", "--no-shell", "--no-droid", "--no-cursor");
+  assert.ok(!existsSync(join(home, ".factory", "settings.json")));
+  assert.ok(!existsSync(join(home, ".cursor", "hooks.json")));
+});
+
+test("uninstall creates no droid or Cursor file that wasn't there", () => {
+  const { home, run } = agentsHome();
+  run("uninstall");
+  assert.ok(!existsSync(join(home, ".factory", "settings.json")));
+  assert.ok(!existsSync(join(home, ".factory", "hooks.json")));
+  assert.ok(!existsSync(join(home, ".cursor", "hooks.json")));
+});
+
+test("droid's hooks move to hooks.json once the person makes one", () => {
+  const { home, run, json } = agentsHome({ cursor: false });
+  run("install", "--no-shell");
+  assert.ok(hasHooks(json(".factory", "settings.json")));
+  writeFileSync(join(home, ".factory", "hooks.json"), "{}\n");
+  run("install", "--no-shell");
+  assert.ok(!hasHooks(json(".factory", "settings.json")), "taken out where droid no longer reads them");
+  assert.match(json(".factory", "hooks.json").SessionStart[0].hooks[0].command, /hook --agent droid$/);
+});
+
+test("uninstall leaves a settings file without Revive in it untouched, formatting and all", () => {
+  const { home, run } = agentsHome();
+  const text = '{"theme":"dark"}';
+  writeFileSync(join(home, ".claude", "settings.json"), text);
+  writeFileSync(join(home, ".cursor", "hooks.json"), text);
+  run("uninstall");
+  assert.equal(readFileSync(join(home, ".claude", "settings.json"), "utf8"), text);
+  assert.equal(readFileSync(join(home, ".cursor", "hooks.json"), "utf8"), text);
+});
+
+test("Cursor's hooks are left out when only the Cursor IDE is installed", () => {
+  const { home, run } = agentsHome({ factory: false, cursorAgent: false });
+  run("install", "--no-shell");
+  assert.ok(!existsSync(join(home, ".cursor", "hooks.json")), "the IDE reads this file too");
+  assert.equal(JSON.parse(run("doctor")).cursor, null, "not installed, so the dialog shows no ✕");
+});
+
+test("cursor-agent counts as installed under ~/.local/share/cursor-agent, off PATH", () => {
+  const { home, run } = agentsHome({ factory: false, cursorAgent: false });
+  mkdirSync(join(home, ".local", "share", "cursor-agent"), { recursive: true });
+  run("install", "--no-shell");
+  assert.ok(hasCursorHooks(JSON.parse(readFileSync(join(home, ".cursor", "hooks.json"), "utf8"))));
+});
+
+test("droid's hooks are left out while the droid CLI isn't installed", () => {
+  const { home, run } = agentsHome({ cursor: false, droid: false });
+  run("install", "--no-shell");
+  assert.ok(!existsSync(join(home, ".factory", "settings.json")));
+  assert.equal(JSON.parse(run("doctor")).droid, null);
+});
+
+test("a CLI in ~/.local/bin counts even when PATH doesn't have it", () => {
+  const { home, run, json } = agentsHome({ cursor: false, droid: false });
+  fakeCli(join(home, ".local", "bin"), "droid");
+  run("install", "--no-shell");
+  assert.ok(hasHooks(json(".factory", "settings.json")));
+});
+
+test("uninstall still cleans an agent whose CLI is gone", () => {
+  const { home, bin, run, json } = agentsHome({ factory: false });
+  run("install", "--no-shell");
+  rmSync(join(bin, "cursor-agent"));
+  run("uninstall");
+  assert.deepEqual(json(".cursor", "hooks.json"), { version: 1 });
+});
+
+test("an agent file that isn't valid JSON skips that agent only", () => {
+  const { home, run, json } = agentsHome();
+  const settings = join(home, ".factory", "settings.json");
+  const broken = '{ // half-edited\n  "model": "x",\n';
+  writeFileSync(settings, broken);
+  const out = run("install");
+  assert.match(out, /Skipped Droid: ~\/\.factory\/settings\.json is not valid JSON; fix it and run install again\./);
+  assert.equal(readFileSync(settings, "utf8"), broken, "never overwritten");
+  assert.ok(!existsSync(`${settings}.revive-backup`));
+  assert.ok(hasHooks(json(".claude", "settings.json")), "agents before it are installed");
+  assert.ok(hasCursorHooks(json(".cursor", "hooks.json")), "agents after it are installed");
+  assert.ok(readFileSync(join(home, ".zshrc"), "utf8").includes("revive"), "the shell block is installed");
+  const doctor = JSON.parse(run("doctor"));
+  assert.equal(doctor.droid, false);
+  assert.equal(doctor.cursor, true);
+  assert.doesNotMatch(run("uninstall"), /Skipped/, "nothing of Revive's in it, so it isn't even read");
+  assert.equal(readFileSync(settings, "utf8"), broken);
 });

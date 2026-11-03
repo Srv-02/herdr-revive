@@ -2,15 +2,16 @@
 // Revive's engine. The mod can't run for a terminal while the app is closed or
 // the machine is rebooting, so the work happens where the session lives:
 //
-//   revive.mjs hook               Claude Code / Codex SessionStart and SessionEnd, and pi's
-//                                 through pi/revive.ts: remember the session on its terminal, or forget it
+//   revive.mjs hook [--agent K]   an agent's SessionStart and SessionEnd (Claude Code, Codex,
+//                                 Droid, Cursor, and pi's through pi/revive.ts): remember the
+//                                 session on its terminal, or forget it
 //   revive.mjs check --shell PID  from the shell's rc file: print the commands that
 //                                 resume a session lost to a restart, or nothing
 //   revive.mjs failed             the resume printed by `check` gave up at once
 //   revive.mjs list [--focus T]   every remembered session, as JSON, for the dialog
 //   revive.mjs resume T           resume T's session in T's shell
 //   revive.mjs auto T on|off      allow or stop automatic resume for T
-//   revive.mjs install [--zsh] [--bash] [--no-shell] [--no-codex] [--no-pi]
+//   revive.mjs install [--zsh] [--bash] [--no-shell] [--no-codex] [--no-pi] [--no-droid] [--no-cursor]
 //   revive.mjs uninstall
 //   revive.mjs doctor             what is installed, as JSON
 //
@@ -23,9 +24,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
-  AGENTS, agentKey, agentEnv, carriedFlags, hookOwner, isOneShot, readRecord, labelArgs, clearArgs, resumedArgs, stateOf, shouldResume,
-  resumeScript, resumeLine, shQuote, validId,
+  AGENTS, agentKey, agentEnv, carriedFlags, hookOwner, hookPayload, endAction, isOneShot, readRecord, labelArgs, clearArgs, resumedArgs,
+  stateOf, shouldResume, resumeScript, resumeLine, shQuote, validId,
 } from "./lib/core.js";
+import { agentDirs, findSession } from "./lib/sessions.js";
 
 const run = promisify(execFile);
 export const ENGINE = fileURLToPath(import.meta.url);
@@ -103,19 +105,20 @@ async function startOf(pid) {
   return (await processes([pid])).get(pid)?.since ?? null;
 }
 
-function agentFromPayload(payload) {
-  const path = String(payload.transcript_path ?? "");
-  if (path.includes("/.codex/")) return "codex";
-  if (path.includes("/.pi/")) return "pi";
-  if (path.includes("/.claude/") || path.includes("/projects/")) return "claude";
-  return null;
-}
+/**
+ * `--agent K`: the agent the hook was installed for (Droid's and Cursor's
+ * hooks say so; Claude Code's and Codex's, from earlier versions, don't).
+ */
+const hintOf = (args) => {
+  const i = args.indexOf("--agent");
+  return i >= 0 && Object.prototype.hasOwnProperty.call(AGENTS, args[i + 1]) ? args[i + 1] : null;
+};
 
-async function hook() {
-  const payload = await readStdin();
+async function hook(args = []) {
+  const payload = hookPayload(await readStdin());
   const t = process.env.HC_TERMINAL_ID;
-  const event = payload.hook_event_name;
-  if (!t || !validId(payload.session_id)) return;
+  const { event, session } = payload;
+  if (!t || !validId(session)) return;
   const terminal = await getTerminal(t);
   // The hook must belong to the agent in the terminal's foreground, not to a
   // `claude -p` that agent ran as a tool (it inherits HC_TERMINAL_ID too).
@@ -131,27 +134,27 @@ async function hook() {
     // process the hook came from, when a wrapper with another name runs it.
     const fgArgv = terminal.foreground?.argv ?? terminal.argv ?? [];
     // pi renames its process `pi`, which hides its flags: its extension sends its command line.
-    const sent = Array.isArray(payload.argv) ? payload.argv.map(String) : null;
+    const sent = payload.argv;
     const argv = sent && agentKey(null, sent) ? sent : agentKey(null, fgArgv) ? fgArgv : table.get(owner.agent)?.argv ?? fgArgv;
     // The command line first: the terminal's last OSC report may still be a
     // previous agent's, sent before this one reported anything.
-    const key = agentKey(null, argv) ?? agentFromPayload(payload) ?? agentKey(terminal.status?.app);
+    const key = agentKey(null, argv) ?? hintOf(args) ?? payload.agent ?? agentKey(terminal.status?.app);
     if (!key) return;
     // `claude -p "…"` or `codex exec` typed in the terminal: it answers and
     // quits, and its SessionEnd ("other") would leave its session on record in
     // place of the interactive one. Neither is worth bringing back.
     if (isOneShot(key, argv)) return;
-    const same = rec?.session === payload.session_id;
+    const same = rec?.session === session;
     // The hook runs in the agent's environment: where it keeps its sessions.
     const env = agentEnv(key, process.env);
     await label(t, labelArgs({
       agent: key,
-      session: payload.session_id,
+      session,
       cwd: payload.cwd || terminal.foreground?.cwd || terminal.cwd || "",
       flags: JSON.stringify(carriedFlags(key, argv)),
       env: Object.keys(env).length ? JSON.stringify(env) : null,
       // pi keeps sessions where its flags, environment or settings say: the file it named is the one to check.
-      transcript: key === "pi" && String(payload.transcript_path ?? "").startsWith("/") ? payload.transcript_path : null,
+      transcript: key === "pi" && String(payload.transcript ?? "").startsWith("/") ? payload.transcript : null,
       shell: terminal.pid ?? "",
       since: table.get(terminal.pid)?.since ?? null,
       at: same ? rec.at ?? Date.now() : Date.now(),
@@ -165,14 +168,14 @@ async function hook() {
   }
 
   if (event === "SessionEnd") {
-    if (!rec || rec.session !== payload.session_id) return;
-    // `/clear` (and `/resume` from inside) ends one session to start another
-    // in the same process; that one's SessionStart records it, and clearing
-    // here could race it and erase the new record.
-    if (payload.reason === "clear" || payload.reason === "resume") return;
-    // A signal (a crash, a kill, a shutdown) reports "other": the record stays,
-    // worth bringing back. `/exit`, Ctrl+C, `/logout`: the person ended it.
-    if (payload.reason !== "other") await label(t, clearArgs());
+    if (!rec || rec.session !== session) return;
+    // Claude Code's reasons (Codex, Droid and pi's extension share them):
+    // `/clear` (and `/resume` from inside) ends one session to start another in
+    // the same process; that one's SessionStart records it, and clearing here
+    // could race it and erase the new record. A signal (a crash, a kill, a
+    // shutdown) reports "other": the record stays, worth bringing back. `/exit`,
+    // Ctrl+C, `/logout`: the person ended it. Cursor's are in its AGENTS entry.
+    if (endAction(rec.agent, payload.reason) === "forget") await label(t, clearArgs());
   }
 }
 
@@ -250,7 +253,10 @@ function forkable(rec, fgPid) {
   return hasTranscript(rec);
 }
 
-function describe(t, since, focus) {
+/** A `ps` start time (`Sat Oct 31 18:49:55 2026`, in LC_ALL=C) in ms, or null. */
+const startMs = (since) => { const ms = Date.parse(since ?? ""); return Number.isFinite(ms) ? ms : null; };
+
+function describe(t, since, focus, fgSince = null) {
   const rec = readRecord(t.labels);
   const live = liveAgent(t);
   const entry = {
@@ -262,11 +268,13 @@ function describe(t, since, focus) {
     rec,
     state: rec ? stateOf(rec, { live: live === rec.agent, pid: t.pid ?? null, since }) : null,
   };
-  // A live agent nobody recorded yet (started before Revive was installed).
-  if (!rec && live === "claude" && t.foreground?.pid) {
-    const session = claudeSessionFor(t.foreground.pid);
+  // A live agent nobody recorded yet (started before Revive was installed),
+  // found from the files it writes (lib/sessions.js).
+  if (!rec && live && t.foreground?.pid) {
+    const cwd = t.foreground.cwd ?? t.cwd ?? null;
+    const session = findSession(live, { dirs: agentDirs(), pid: t.foreground.pid, cwd, startedMs: startMs(fgSince) });
     if (session) {
-      entry.rec = { agent: "claude", session, cwd: t.foreground.cwd ?? t.cwd ?? null, flags: carriedFlags("claude", t.foreground.argv), shell: t.pid, auto: true };
+      entry.rec = { agent: live, session, cwd, flags: carriedFlags(live, t.foreground.argv), shell: t.pid, auto: true };
       entry.state = "running";
       entry.unrecorded = true;
     }
@@ -281,9 +289,10 @@ function describe(t, since, focus) {
 async function list(args) {
   const focus = args.includes("--focus") ? args[args.indexOf("--focus") + 1] : null;
   const terminals = await listTerminals();
-  const pids = terminals.map((t) => t.pid).filter(Boolean);
-  const procs = pids.length ? await processes(pids) : new Map();
-  const entries = terminals.map((t) => describe(t, procs.get(t.pid)?.since ?? null, focus)).filter((e) => e.rec || e.address === focus);
+  const pids = terminals.flatMap((t) => [t.pid, t.foreground?.pid]).filter(Boolean);
+  const procs = pids.length ? await processes([...new Set(pids)]) : new Map();
+  const since = (pid) => (pid ? procs.get(pid)?.since ?? null : null);
+  const entries = terminals.map((t) => describe(t, since(t.pid), focus, since(t.foreground?.pid))).filter((e) => e.rec || e.address === focus);
   // The setup only changes on install; the dialog asks for it when it opens and after.
   const out = { entries };
   if (args.includes("--setup")) out.setup = doctorReport();
@@ -321,6 +330,7 @@ async function auto(args) {
 // ── install ─────────────────────────────────────────────────────────────────
 
 const HOOK_COMMAND = `node ${shQuote(ENGINE)} hook`;
+const hookCommand = (agent = null) => (agent ? `${HOOK_COMMAND} --agent ${agent}` : HOOK_COMMAND);
 const claudeSettings = () => join(claudeDir(), "settings.json");
 const codexDir = () => process.env.CODEX_HOME || join(homedir(), ".codex");
 const codexHooks = () => join(codexDir(), "hooks.json");
@@ -331,6 +341,16 @@ const PI_EXTENSION = join(dirname(ENGINE), "pi", "revive.ts");
 const piExtension = () => join(piDir(), "extensions", "herdr-revive.ts");
 // Its first line. A copy placed by something else (a Nix store path) counts too.
 const isPiExtension = (path) => readText(path).includes("herdr-revive: pi extension");
+const factoryDir = () => agentDirs({ ...process.env, HOME: homedir() }).factory;
+const cursorDir = () => agentDirs({ ...process.env, HOME: homedir() }).cursor;
+
+/**
+ * Whether a CLI is installed: on PATH, or in ~/.local/bin, where the Droid and
+ * cursor-agent installers put it. The Herdr app may run Revive with a shorter
+ * PATH than the person's shell has, hence the fallback.
+ */
+const hasCli = (bin) => [...(process.env.PATH ?? "").split(":").filter(Boolean), join(homedir(), ".local", "bin")]
+  .some((dir) => existsSync(join(dir, bin)));
 
 /**
  * Herdr starts terminals as login shells (`zsh -l`, `bash -l`). zsh reads
@@ -409,23 +429,24 @@ export function shellBlock(engine = ENGINE) {
 }
 
 /**
- * Adds (or, with remove, takes out) Revive's SessionStart/SessionEnd hooks.
- * An event that already has exactly Revive's hook is left as it is, wherever
+ * Adds (or, with remove, takes out) Revive's SessionStart/SessionEnd hooks, in
+ * Claude Code's format, which Codex and Factory Droid share. An event that already has exactly Revive's hook is left as it is, wherever
  * it sits: other tools write this file too, and moving Revive's group back to
  * the end each time would rewrite it for nothing. `timeouts` sets an event's
  * timeout (Codex clamps SessionEnd to 3 seconds and warns about more).
  */
-export function withHooks(settings, { remove = false, matcher = false, timeouts = {} } = {}) {
+export function withHooks(settings, { remove = false, matcher = false, timeouts = {}, agent = null } = {}) {
   const out = structuredClone(settings ?? {});
   out.hooks ??= {};
+  const command = hookCommand(agent);
   for (const event of EVENTS) {
     const timeout = timeouts[event] ?? 10;
     const ours = (out.hooks[event] ?? []).flatMap((g) => (g.hooks ?? []).filter(isOurs));
-    if (!remove && ours.length === 1 && ours[0].command === HOOK_COMMAND && ours[0].timeout === timeout) continue;
+    if (!remove && ours.length === 1 && ours[0].command === command && ours[0].timeout === timeout) continue;
     const groups = (out.hooks[event] ?? [])
       .map((g) => ({ ...g, hooks: (g.hooks ?? []).filter((h) => !isOurs(h)) }))
       .filter((g) => g.hooks.length);
-    if (!remove) groups.push({ ...(matcher ? { matcher: "" } : {}), hooks: [{ type: "command", command: HOOK_COMMAND, timeout }] });
+    if (!remove) groups.push({ ...(matcher ? { matcher: "" } : {}), hooks: [{ type: "command", command, timeout }] });
     if (groups.length) out.hooks[event] = groups;
     else delete out.hooks[event];
   }
@@ -434,6 +455,39 @@ export function withHooks(settings, { remove = false, matcher = false, timeouts 
 }
 
 export const hasHooks = (settings) => EVENTS.every((e) => (settings?.hooks?.[e] ?? []).some((g) => (g.hooks ?? []).some(isOurs)));
+
+/**
+ * Droid's standalone `~/.factory/hooks.json` holds the same event map with no
+ * `hooks` wrapper around it.
+ */
+const unwrapped = (fn) => (doc, opts) => fn({ hooks: doc ?? {} }, opts).hooks ?? {};
+const withBareHooks = unwrapped(withHooks);
+const hasBareHooks = (doc) => hasHooks({ hooks: doc ?? {} });
+
+/**
+ * Cursor's `~/.cursor/hooks.json`: `{ version: 1, hooks: { sessionStart:
+ * [{ command }], … } }`, camelCase events and no groups. No timeout is
+ * written: the docs don't give its unit. Revive's entry, already right, is
+ * left where it is.
+ */
+const CURSOR_EVENTS = ["sessionStart", "sessionEnd"];
+export function withCursorHooks(doc, { remove = false } = {}) {
+  const out = structuredClone(doc ?? {});
+  if (!remove) out.version ??= 1;
+  out.hooks ??= {};
+  const command = hookCommand("cursor");
+  for (const event of CURSOR_EVENTS) {
+    const ours = (out.hooks[event] ?? []).filter(isOurs);
+    if (!remove && ours.length === 1 && ours[0].command === command) continue;
+    const list = (out.hooks[event] ?? []).filter((h) => !isOurs(h));
+    if (!remove) list.push({ command });
+    if (list.length) out.hooks[event] = list;
+    else delete out.hooks[event];
+  }
+  if (!Object.keys(out.hooks).length) delete out.hooks;
+  return out;
+}
+export const hasCursorHooks = (doc) => CURSOR_EVENTS.every((e) => (doc?.hooks?.[e] ?? []).some(isOurs));
 
 export function withShellBlock(text, { remove = false } = {}) {
   if (remove && !text.includes(BEGIN)) return text;
@@ -448,8 +502,17 @@ function readJson(path) {
   const text = readFileSync(path, "utf8");
   if (!text.trim()) return {};
   try { return JSON.parse(text); }
-  catch { throw new Error(`${path} is not valid JSON; fix it first, Revive won't overwrite it.`); }
+  catch { throw new InvalidJson(path); }
 }
+
+class InvalidJson extends Error {
+  constructor(path) {
+    super(`${path} is not valid JSON; fix it first, Revive won't overwrite it.`);
+    this.path = path;
+  }
+}
+
+const tilde = (path) => (path.startsWith(`${homedir()}/`) ? `~${path.slice(homedir().length)}` : path);
 
 /**
  * Writes a file atomically. The first time Revive changes it, the person's
@@ -492,37 +555,90 @@ function shells(args) {
 const CODEX_HOOKS = { matcher: true, timeouts: { SessionEnd: 3 } };
 
 /**
- * Writes Revive's hooks into a JSON settings file. A file whose hooks are
- * already right is not written, even when another tool formatted it
- * differently (sorted its keys, say): only a real change rewrites it.
+ * Where each agent's hooks are installed. `files` lists every file they may
+ * be in; `target` is the one the agent reads now (Droid reads settings.json's
+ * `hooks` only while there is no hooks.json). An agent is installed only when
+ * `present`: Claude Code's and Codex's folder is there, Droid's and Cursor's
+ * CLI is (not just their folder: Cursor's IDE makes ~/.cursor and reads its
+ * hooks.json too). `flag` (`--no-…`) skips it.
  */
-function saveHooks(path, options) {
+const HOOK_TARGETS = {
+  // Like Codex: only when Claude Code is there, so a Codex-only setup gets no ~/.claude.
+  claude: { dir: claudeDir, present: () => existsSync(claudeDir()), files: () => [claudeSettings()], edit: (d, o) => withHooks(d, o), has: hasHooks },
+  codex: {
+    dir: codexDir,
+    present: () => existsSync(codexDir()),
+    flag: "--no-codex",
+    trust: "Codex asks to trust new hooks the next time it starts.",
+    files: () => [codexHooks()],
+    edit: (d, o) => withHooks(d, { ...o, ...CODEX_HOOKS }),
+    has: hasHooks,
+  },
+  droid: {
+    dir: factoryDir,
+    present: () => existsSync(factoryDir()) && hasCli("droid"),
+    flag: "--no-droid",
+    files: () => [join(factoryDir(), "hooks.json"), join(factoryDir(), "settings.json")],
+    target: (files) => (existsSync(files[0]) ? files[0] : files[1]),
+    edit: (d, o, file) => (file.endsWith("hooks.json") ? withBareHooks(d, { ...o, agent: "droid" }) : withHooks(d, { ...o, agent: "droid" })),
+    has: (d, file) => (file.endsWith("hooks.json") ? hasBareHooks(d) : hasHooks(d)),
+  },
+  cursor: {
+    dir: cursorDir,
+    present: () => hasCli("cursor-agent") || existsSync(join(homedir(), ".local", "share", "cursor-agent")),
+    flag: "--no-cursor",
+    files: () => [join(cursorDir(), "hooks.json")],
+    edit: (d, o) => withCursorHooks(d, o),
+    has: hasCursorHooks,
+  },
+};
+const targetOf = (h) => (h.target ?? ((files) => files[0]))(h.files());
+
+/**
+ * Writes Revive's hooks into one JSON file. A file whose hooks are already
+ * right is not written, even when another tool formatted it differently
+ * (sorted its keys, say): only a real change rewrites it.
+ */
+function saveHooks(path, edit) {
   const before = readJson(path);
-  const after = withHooks(before, options);
+  const after = edit(before);
   if (existsSync(path) && JSON.stringify(after) === JSON.stringify(before)) return false;
   return save(path, JSON.stringify(after, null, 2) + "\n");
 }
 
 function install(args, remove = false) {
   const changed = [];
-  // Like Codex: only when Claude Code is there, so a Codex-only setup gets no ~/.claude.
-  if (existsSync(claudeDir())) {
-    const claude = claudeSettings();
-    if (!remove || existsSync(claude)) {
-      if (saveHooks(claude, { remove })) changed.push(claude);
-    }
-  }
-  if (!args.includes("--no-codex") && existsSync(codexDir())) {
-    const codex = codexHooks();
-    if (!remove || existsSync(codex)) {
-      if (saveHooks(codex, { remove, ...CODEX_HOOKS })) changed.push(codex);
+  const notes = [];
+  for (const [key, h] of Object.entries(HOOK_TARGETS)) {
+    // Uninstall still cleans an agent whose CLI is gone, as long as its folder is there.
+    if ((h.flag && args.includes(h.flag)) || !(remove ? existsSync(h.dir()) : h.present())) continue;
+    const target = targetOf(h);
+    try {
+      for (const file of h.files()) {
+        // Install into the file the agent reads; take Revive out of every other.
+        // A file without Revive in it is left as it is, formatting and all.
+        const off = remove || file !== target;
+        if (off && !readText(file).includes("revive.mjs")) continue;
+        if (saveHooks(file, (doc) => h.edit(doc, { remove: off }, file))) {
+          changed.push(file);
+          if (!off && h.trust) notes.push(h.trust);
+        }
+      }
+    } catch (err) {
+      // One unreadable file skips that agent only; the others and the shell go on.
+      if (!(err instanceof InvalidJson)) throw err;
+      notes.push(`Skipped ${AGENTS[key].name}: ${tilde(err.path)} is not valid JSON; fix it and run ${remove ? "uninstall" : "install"} again.`);
     }
   }
   // A file of someone else's at pi's path: say so, and still install the rest.
   let piWarning = null;
   if (!args.includes("--no-pi") && existsSync(piDir())) {
-    try { if (linkPiExtension(remove)) changed.push(piExtension()); }
-    catch (err) { piWarning = err.message; }
+    try {
+      if (linkPiExtension(remove)) {
+        changed.push(piExtension());
+        if (!remove) notes.push("pi loads the extension the next time it starts (or at /reload).");
+      }
+    } catch (err) { piWarning = err.message; }
   }
   if (!args.includes("--no-shell")) {
     for (const rc of remove ? ALL_RC() : shells(args).map((s) => RC[s]())) {
@@ -531,8 +647,8 @@ function install(args, remove = false) {
     }
   }
   process.stdout.write(changed.length ? `${remove ? "Removed from" : "Updated"}:\n${changed.map((p) => `  ${p}`).join("\n")}\n` : "Nothing to change.\n");
-  if (!remove && changed.includes(codexHooks())) process.stdout.write("Codex asks to trust new hooks the next time it starts.\n");
-  if (!remove && changed.includes(piExtension())) process.stdout.write("pi loads the extension the next time it starts (or at /reload).\n");
+  // On stdout, beside what did change: the dialog shows that output as its note.
+  for (const line of notes) process.stdout.write(`${line}\n`);
   if (piWarning) process.stderr.write(`${piWarning}\n`);
 }
 
@@ -558,10 +674,15 @@ function linkPiExtension(remove) {
 
 export function doctorReport() {
   const safe = (fn) => { try { return fn(); } catch { return false; } };
+  // Per agent: true or false, or null for an agent that isn't installed.
+  const hooks = Object.fromEntries(Object.entries(HOOK_TARGETS).map(([key, h]) => {
+    if (!h.present()) return [key, null];
+    const file = targetOf(h);
+    return [key, safe(() => h.has(readJson(file), file))];
+  }));
   return {
     engine: ENGINE,
-    claude: existsSync(claudeDir()) ? safe(() => hasHooks(readJson(claudeSettings()))) : null,
-    codex: existsSync(codexDir()) ? safe(() => hasHooks(readJson(codexHooks()))) : null,
+    ...hooks,
     pi: existsSync(piDir()) ? safe(() => isPiExtension(piExtension())) : null,
     shell: Object.fromEntries(Object.entries(RC).map(([s, rc]) => [s, readText(rc()).includes(BEGIN)])),
   };
@@ -570,7 +691,7 @@ export function doctorReport() {
 // ── main ────────────────────────────────────────────────────────────────────
 
 const COMMANDS = {
-  hook: { run: hook, quiet: true },
+  hook: { run: (a) => hook(a), quiet: true },
   check: { run: check, quiet: true },
   failed: { run: failed, quiet: true },
   list: { run: list },

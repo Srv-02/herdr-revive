@@ -9,7 +9,7 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { exec, run, theme, focused, appHome, home, props, closeOverlay, notify } from "herdr";
-import { AGENTS, command, shortId, ago, shJoin } from "./lib/core.js";
+import { AGENTS, canFork, command, shortId, ago, shJoin } from "./lib/core.js";
 
 const ENGINE = () => `${appHome()}/mods/revive/revive.mjs`;
 const REFRESH_MS = 4000;
@@ -183,7 +183,7 @@ export default class Revive extends View {
     if (k === "escape") { cx.stop_propagation(); this.close(); return; }
     if (k === "r") { this.load(cx); return; }
     if (!entry?.rec) return;
-    if (entry.state === "running") {
+    if (entry.state === "running" && canFork(entry.rec.agent)) {
       if (k === "f") this.fork(entry, "right");
       else if (k === "d") this.fork(entry, "down");
       else if (k === "t") this.fork(entry, "tab");
@@ -199,11 +199,12 @@ export default class Revive extends View {
     }
     if (!entry?.rec && AGENTS[entry?.live]) return this.unrecordedCard(t, entry);
     if (!entry?.rec) {
-      return div().text_size(12).text_color(t.dim).child(this.loading ? "Looking…" : "No Claude Code, Codex or pi session in the focused terminal.");
+      return div().text_size(12).text_color(t.dim).child(this.loading ? "Looking…" : "No agent session in the focused terminal.");
     }
     const { rec, state } = entry;
     const agent = AGENTS[rec.agent];
     const running = state === "running";
+    const forks = canFork(rec.agent);
     const empty = running && entry.forkable === false;
     const flags = rec.flags?.length ? shJoin(rec.flags) : null;
     return v_flex().gap(12).p(14).rounded(12).bg(t.raised).border_1().border_color(t.border)
@@ -215,10 +216,13 @@ export default class Revive extends View {
       .child(v_flex().gap(4).text_size(12).text_color(t.muted)
         .when(Boolean(rec.cwd), (el) => el.child(div().truncate().child(tilde(rec.cwd))))
         .when(Boolean(flags), (el) => el.child(div().truncate().text_color(t.dim).font_family("JetBrains Mono").text_size(10.5).child(flags)))
-        .when(Boolean(entry.unrecorded), (el) => el.child(div().text_color(t.dim).child("Started before Revive was installed: it can be forked, but won't come back by itself.")))
-        .when(empty, (el) => el.child(div().text_color(t.dim).child(NO_MESSAGE))))
+        .when(Boolean(entry.unrecorded), (el) => el.child(div().text_color(t.dim).child(forks
+          ? "Started before Revive was installed: it can be forked, but won't come back by itself."
+          : "Started before Revive was installed: it won't come back by itself.")))
+        .when(running && !forks, (el) => el.child(div().text_color(t.dim).child(`${agent?.name ?? rec.agent} can't fork a session.`)))
+        .when(forks && empty, (el) => el.child(div().text_color(t.dim).child(NO_MESSAGE))))
       .child(h_flex().gap(6).flex_wrap()
-        .when(running, (el) => el
+        .when(running && forks, (el) => el
           .child(button(t, "fork-right", "Fork right", () => this.fork(entry, "right"), { hint: "F", disabled: empty }))
           .child(button(t, "fork-down", "Fork below", () => this.fork(entry, "down"), { hint: "D", disabled: empty }))
           .child(button(t, "fork-tab", "Fork to a tab", () => this.fork(entry, "tab"), { hint: "T", disabled: empty })))
@@ -271,17 +275,18 @@ export default class Revive extends View {
     const s = this.setup;
     if (!s) return div();
     const shellOk = Object.values(s.shell ?? {}).some(Boolean);
-    // Each agent's hooks count only when that agent is installed (null: it isn't).
+    // One entry per agent: true, false, or null when that agent isn't installed.
+    const agents = Object.keys(AGENTS).filter((k) => s[k] !== null && s[k] !== undefined);
+    const ok = shellOk && agents.every((k) => s[k]);
     const part = (name, on) => h_flex().gap(4).text_color(on ? t.muted : t.ansi1)
       .child(div().text_color(on ? t.ansi2 : t.ansi1).child(on ? "✓" : "✕"))
       .child(name);
     return h_flex().gap(10).items_center().text_size(11)
-      .when(s.claude !== null, (el) => el.child(part("Claude Code hooks", s.claude)))
-      .when(s.codex !== null, (el) => el.child(part("Codex hooks", s.codex)))
-      .when(s.pi != null, (el) => el.child(part("pi extension", s.pi)))
+      // pi's hooks come from an extension, not a hooks file.
+      .children(agents.map((k) => part(k === "pi" ? "pi extension" : `${AGENTS[k].name} hooks`, s[k])))
       .child(part("shell", shellOk))
       .child(div().flex_1())
-      .when(!shellOk || s.claude === false || s.codex === false || s.pi === false, (el) => el.child(button(t, "install", this.busy ? "Installing…" : "Install", (_e, cx) => this.install(cx), { kind: "solid", disabled: this.busy })));
+      .when(!ok, (el) => el.child(button(t, "install", this.busy ? "Installing…" : "Install", (_e, cx) => this.install(cx), { kind: "solid", disabled: this.busy })));
   }
 
   render(cx) {
