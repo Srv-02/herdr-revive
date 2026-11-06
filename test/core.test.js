@@ -28,22 +28,58 @@ test("agents are known by their report or their command line", () => {
 
 test("only the launch flags worth keeping are carried, values included", () => {
   assert.deepEqual(
-    carriedFlags("claude", ["claude", "--dangerously-skip-permissions", "--model", "haiku", "--resume", "x", "fix the bug"]),
-    ["--dangerously-skip-permissions", "--model", "haiku"],
+    carriedFlags("claude", ["claude", "--permission-mode", "plan", "--model", "haiku", "--resume", "x", "fix the bug"]),
+    ["--permission-mode", "plan", "--model", "haiku"],
   );
   assert.deepEqual(carriedFlags("claude", ["claude", "--model=opus", "-p", "hi"]), ["--model=opus"]);
-  assert.deepEqual(carriedFlags("codex", ["node", "/x/codex", "--no-daemon", "-m", "gpt-5", "--yolo", "task"]), ["--no-daemon", "-m", "gpt-5", "--yolo"]);
-  assert.deepEqual(carriedFlags("claude", ["claude", "--model"]), ["--model"]);
+  assert.deepEqual(carriedFlags("codex", ["node", "/x/codex", "--no-daemon", "-m", "gpt-5", "-s", "workspace-write", "task"]), ["--no-daemon", "-m", "gpt-5", "-s", "workspace-write"]);
+  // A value flag without its value is dropped, not carried bare.
+  assert.deepEqual(carriedFlags("claude", ["claude", "--model"]), []);
   assert.deepEqual(carriedFlags("nope", ["x", "--model", "y"]), []);
   assert.deepEqual(
     carriedFlags("pi", ["pi", "--provider", "anthropic", "--model", "sonnet", "--thinking", "high", "-t", "read,bash", "-e", "/x/ext.ts", "--session", "x", "fix it"]),
-    ["--provider", "anthropic", "--model", "sonnet", "--thinking", "high", "-t", "read,bash", "-e", "/x/ext.ts"],
+    ["--provider", "anthropic", "--model", "sonnet", "--thinking", "high", "-t", "read,bash"],
   );
 });
 
-test("--add-dir keeps every folder it was given", () => {
-  assert.deepEqual(carriedFlags("claude", ["claude", "--add-dir", "../lib", "../shared", "--model", "opus"]), ["--add-dir", "../lib", "../shared", "--model", "opus"]);
-  assert.deepEqual(carriedFlags("claude", ["claude", "--add-dir=../lib"]), ["--add-dir=../lib"]);
+test("permission and sandbox modes come back as they ran", () => {
+  const same = {
+    claude: [["--dangerously-skip-permissions"], ["--allow-dangerously-skip-permissions"], ["--permission-mode", "bypassPermissions"], ["--permission-mode=bypassPermissions"]],
+    codex: [["--dangerously-bypass-approvals-and-sandbox"], ["--yolo"], ["--full-auto"], ["--approve-for-me"], ["-a", "never"], ["--ask-for-approval", "never"],
+      ["-s", "danger-full-access"], ["--sandbox=danger-full-access"]],
+    pi: [["-a"], ["--approve"]],
+    omp: [["--auto-approve"], ["--approval-mode", "yolo"], ["--approval-mode=yolo"], ["--plan-yolo"]],
+    droid: [["--auto", "high"]],
+    cursor: [["-f"], ["--force"], ["--yolo"], ["--sandbox", "disabled"]],
+  };
+  for (const [key, cases] of Object.entries(same)) {
+    for (const flags of cases) assert.deepEqual(carriedFlags(key, ["x", ...flags]), flags, `${key} ${flags.join(" ")}`);
+  }
+  // Read back from a label, too.
+  assert.deepEqual(readRecord(labels({ agent: "codex", session: ID, flags: '["--dangerously-bypass-approvals-and-sandbox","-s","danger-full-access"]' })).flags,
+    ["--dangerously-bypass-approvals-and-sandbox", "-s", "danger-full-access"]);
+});
+
+test("flags that load code, configuration, instructions or folders are never carried", () => {
+  const never = {
+    claude: [["--settings", "/s.json"], ["--settings={\"hooks\":{}}"], ["--mcp-config", "/m.json"], ["--plugin-dir", "/p"], ["--add-dir", "/"], ["--add-dir=/"],
+      ["--append-system-prompt", "x"], ["--system-prompt", "x"]],
+    codex: [["-c", "x=y"], ["--config", "x=y"], ["--dangerously-bypass-hook-trust"], ["--profile", "../x"]],
+    pi: [["-e", "/x.ts"], ["--extension", "/x.ts"], ["--skill", "/s"], ["--system-prompt", "x"], ["--append-system-prompt", "x"]],
+    omp: [["-e", "/x.ts"], ["--extension", "/x.ts"], ["--hook", "/h.ts"], ["--config", "/c.yml"], ["--add-dir", "/"], ["--allow-home"],
+      ["--system-prompt", "x"], ["--system-prompt-template", "x"], ["--append-system-prompt", "x"], ["--api-key", "k"], ["--profile", "../../x"]],
+    droid: [["--settings", "/s.json"], ["--append-system-prompt", "x"], ["--append-system-prompt-file", "/p"]],
+    cursor: [["--approve-mcps"], ["--plugin-dir", "/p"], ["--api-key", "k"]],
+  };
+  for (const [key, cases] of Object.entries(never)) {
+    for (const flags of cases) assert.deepEqual(carriedFlags(key, ["x", ...flags]), [], `${key} ${flags.join(" ")}`);
+  }
+});
+
+test("a value that looks like a flag is not taken as a value", () => {
+  // `--model --settings /s.json` must not carry --settings as the model's value.
+  assert.deepEqual(carriedFlags("claude", ["claude", "--model", "--settings", "/s.json", "--agent", "rev"]), ["--agent", "rev"]);
+  assert.deepEqual(carriedFlags("omp", ["omp", "--model", "-e", "/x.ts"]), []);
 });
 
 test("a first prompt named like an object's own property is not a flag", () => {
@@ -98,6 +134,11 @@ test("labels read back as a record", () => {
   assert.equal(readRecord({}), null);
   assert.equal(readRecord(undefined), null);
   assert.deepEqual(readRecord(labels({ session: ID, flags: "{broken" })).flags, []);
+  // Flags read back pass the carry list again: a label is not proof Revive wrote it.
+  assert.deepEqual(readRecord(labels({ agent: "claude", session: ID, flags: '["--dangerously-skip-permissions","--settings","/s.json","--model","opus","--mcp-config","/m.json"]' })).flags, ["--dangerously-skip-permissions", "--model", "opus"]);
+  assert.deepEqual(readRecord(labels({ agent: "omp", session: ID, flags: '["-e","/x.ts","--model","opus","--hook","/h.ts"]' })).flags, ["--model", "opus"]);
+  assert.deepEqual(readRecord(labels({ session: ID, flags: '["--model","opus"]' })).flags, [], "no agent, no carry list");
+  assert.deepEqual(readRecord(labels({ agent: "claude", session: ID, flags: '{"0":"--settings"}' })).flags, []);
   assert.equal(readRecord(labels({ session: ID, auto: "off" })).auto, false);
 });
 

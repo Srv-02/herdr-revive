@@ -359,3 +359,15 @@ test("Cursor's completed session is forgotten; an aborted one is kept", () => {
   aborted.run(cursorEnd("aborted"));
   assert.deepEqual(aborted.calls(), []);
 });
+
+test("omp's SessionStart is remembered with the command line its extension sends", () => {
+  // omp renames its process `omp`: the foreground shows no flags.
+  const { run, calls, set } = setup({ bin: "omp", argv: ["omp"], app: "omp" });
+  const transcript = `/home/me/.omp/agent/sessions/-w/2026-01-01T00-00-00-000Z_${ID}.jsonl`;
+  run({ ...start, transcript_path: transcript, argv: ["omp", "--model", "opus", "-e", "/x.ts", "fix it"] });
+  const got = set(calls());
+  assert.equal(got["revive.agent"], "omp");
+  assert.equal(got["revive.session"], ID);
+  assert.equal(got["revive.flags"], '["--model","opus"]');
+  assert.equal(got["revive.transcript"], transcript);
+});

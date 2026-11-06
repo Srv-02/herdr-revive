@@ -282,8 +282,8 @@ export default class Revive extends View {
       .child(div().text_color(on ? t.ansi2 : t.ansi1).child(on ? "✓" : "✕"))
       .child(name);
     return h_flex().gap(10).items_center().text_size(11)
-      // pi's hooks come from an extension, not a hooks file.
-      .children(agents.map((k) => part(k === "pi" ? "pi extension" : `${AGENTS[k].name} hooks`, s[k])))
+      // pi's and omp's hooks come from an extension, not a hooks file.
+      .children(agents.map((k) => part(k === "pi" || k === "omp" ? `${AGENTS[k].name} extension` : `${AGENTS[k].name} hooks`, s[k])))
       .child(part("shell", shellOk))
       .child(div().flex_1())
       .when(!ok, (el) => el.child(button(t, "install", this.busy ? "Installing…" : "Install", (_e, cx) => this.install(cx), { kind: "solid", disabled: this.busy })));

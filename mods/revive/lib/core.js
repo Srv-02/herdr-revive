@@ -17,6 +17,9 @@ export const KEYS = ["agent", "session", "cwd", "flags", "env", "transcript", "s
  * a crash: worth bringing back) or "forget" (the person ended it).
  * Claude Code's reasons, which Codex, Factory Droid and pi's extension share.
  */
+/** A value flag that names one of the person's own profiles, not a path. */
+const NAME = { arg: 1, ok: (v) => /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(v) };
+
 const claudeEnd = (reason) => (reason === "clear" || reason === "resume" ? "ignore" : reason === "other" ? "keep" : "forget");
 
 /**
@@ -32,11 +35,32 @@ const claudeEnd = (reason) => (reason === "clear" || reason === "resume" ? "igno
  *              agent can't (the dialog then offers no fork)
  * - `end`      how its SessionEnd reasons are taken (default: claudeEnd)
  * - `carry`    the launch flags a resume or fork keeps, so a session that ran
- *              with `--dangerously-skip-permissions` or another model comes
- *              back the way it was: 0 for a switch, 1 for a flag that takes a
- *              value, 2 for one that takes every value up to the next flag.
- *              Anything else on the original command line (a first prompt,
- *              `--resume` itself, a secret) is left behind.
+ *              with another model comes back the way it was: 0 for a switch,
+ *              1 for a flag that takes a value, 2 for one that takes every
+ *              value up to the next flag, or `{ arg: 1, ok }` for a value
+ *              flag whose value `ok(value)` must accept. Anything else on the
+ *              original command line (a first prompt, `--resume` itself, a
+ *              secret) is left behind. The same list filters the flags read
+ *              back from the terminal's labels (see `readRecord`).
+ *
+ * What is carried and what never is, and why: the flags travel through a
+ * terminal label, which anything that can talk to herdr-core can write, and
+ * they come back unattended after a reboot.
+ * - Permission and sandbox modes are carried as recorded
+ *   (`--dangerously-skip-permissions`, `--permission-mode`, Codex's
+ *   approval and sandbox flags, `--force`, `--auto-approve`, ...). A label
+ *   writer already runs as the person, and a resumed agent waits for input
+ *   before it acts: the session comes back the way it ran.
+ * - Never carried: flags that make the agent load something it would not
+ *   load otherwise, because that runs code or instructions at once on
+ *   resume: settings, hooks, extensions, plugins or MCP servers
+ *   (`--settings`, `--mcp-config`, `--plugin-dir`, `-e/--extension`,
+ *   `--hook`, `--config`, `--approve-mcps`, Codex's
+ *   `--dangerously-bypass-hook-trust`), extra instructions
+ *   (`--system-prompt`, `--append-system-prompt`, `--skill`) and extra
+ *   folders (`--add-dir`, omp's `--allow-home`).
+ * A session started with one of these comes back without it; the person adds
+ * it again if they want it.
  * The engine (revive.mjs) has the other half: where each agent's hooks are
  * installed, and lib/sessions.js how to find a session nobody recorded.
  *
@@ -64,8 +88,6 @@ export const AGENTS = {
       "--allow-dangerously-skip-permissions": 0,
       "--permission-mode": 1,
       "--model": 1,
-      "--add-dir": 2,
-      "--settings": 1,
       "--agent": 1,
     },
   },
@@ -83,6 +105,7 @@ export const AGENTS = {
       "--dangerously-bypass-approvals-and-sandbox": 0,
       "--yolo": 0,
       "--full-auto": 0,
+      "--approve-for-me": 0,
       "--search": 0,
       "-m": 1,
       "--model": 1,
@@ -90,8 +113,8 @@ export const AGENTS = {
       "--sandbox": 1,
       "-a": 1,
       "--ask-for-approval": 1,
-      "-p": 1,
-      "--profile": 1,
+      "-p": NAME,
+      "--profile": NAME,
     },
   },
   pi: {
@@ -118,24 +141,62 @@ export const AGENTS = {
       "--no-tools": 0,
       "-nbt": 0,
       "--no-builtin-tools": 0,
-      "-e": 1,
-      "--extension": 1,
       "-ne": 0,
       "--no-extensions": 0,
       "--no-mcp": 0,
-      "--skill": 1,
       "-ns": 0,
       "--no-skills": 0,
       "-nc": 0,
       "--no-context-files": 0,
-      "--system-prompt": 1,
-      "--append-system-prompt": 1,
       "--session-dir": 1,
       "-a": 0,
       "--approve": 0,
       "-na": 0,
       "--no-approve": 0,
       "--offline": 0,
+    },
+  },
+  // oh-my-pi (omp), checked against omp 18.16.0: a fork of pi with its own
+  // home (~/.omp/agent) and its own extension folder, and `--resume <id>`
+  // where pi has `--session`. Like pi it renames its process (`omp`), so its
+  // extension (omp/revive.ts) sends its command line, and it reports itself
+  // to Herdr as `omp`. Its `session_shutdown` carries no reason, so the
+  // extension tells a person's /exit from a signal itself.
+  omp: {
+    name: "omp",
+    bin: "omp",
+    apps: ["omp", "oh-my-pi"],
+    argv0Only: true,
+    resume: (id, flags) => ["omp", ...flags, "--resume", id],
+    fork: (id, flags) => ["omp", ...flags, "--fork", id],
+    env: ["PI_CODING_AGENT_DIR"],
+    oneShot: (args) => args.some((w, i) => w === "-p" || w === "--print" || w === "--no-session" || w.startsWith("--export")
+      || /^--mode=(json|rpc|rpc-ui)$/.test(w) || (w === "--mode" && /^(json|rpc|rpc-ui)$/.test(args[i + 1] ?? ""))),
+    carry: {
+      "--model": 1,
+      "--smol": 1,
+      "--slow": 1,
+      "--plan": 1,
+      "--provider": 1,
+      "--models": 1,
+      "--thinking": 1,
+      "--service-tier": 1,
+      "--tools": 1,
+      "--skills": 1,
+      "--no-tools": 0,
+      "--no-lsp": 0,
+      "--no-pty": 0,
+      "--no-extensions": 0,
+      "--no-skills": 0,
+      "--no-rules": 0,
+      "--no-context-files": 0,
+      "--no-title": 0,
+      "--hide-thinking": 0,
+      "--session-dir": 1,
+      "--profile": NAME,
+      "--approval-mode": 1,
+      "--auto-approve": 0,
+      "--plan-yolo": 0,
     },
   },
   // Factory Droid, checked against droid 1.1.0: `--resume <id>` reopens the
@@ -154,11 +215,8 @@ export const AGENTS = {
     oneShot: (args) => args[0] === "exec",
     carry: {
       "--auto": 1,
-      "--settings": 1,
       "--use-spec": 0,
       "--disable-builtin-skills": 0,
-      "--append-system-prompt": 1,
-      "--append-system-prompt-file": 1,
     },
   },
   // Cursor CLI, checked against cursor-agent 2026.10.22: the sessionStart
@@ -196,11 +254,9 @@ export const AGENTS = {
       "--yolo": 0,
       "--model": 1,
       "--sandbox": 1,
-      "--approve-mcps": 0,
       "--mode": 1,
       "--plan": 0,
       "--workspace": 1,
-      "--plugin-dir": 1,
     },
   },
 };
@@ -256,6 +312,7 @@ export function hookPayload(payload) {
 function payloadAgent(p) {
   const path = String(p.transcript_path ?? "");
   if (path.includes("/.codex/")) return "codex";
+  if (path.includes("/.omp/")) return "omp";
   if (path.includes("/.pi/")) return "pi";
   if (path.includes("/.factory/")) return "droid";
   if (path.includes("/.cursor/") || p.cursor_version !== undefined) return "cursor";
@@ -281,22 +338,50 @@ export function agentEnv(key, env = {}) {
   return Object.fromEntries(names.filter((n) => typeof env[n] === "string" && env[n] !== "").map((n) => [n, env[n]]));
 }
 
-/** The launch flags worth keeping, in their original order. */
+const arity = (spec) => (typeof spec === "object" ? spec.arg : spec);
+/** Whether a value may go with a value flag: not another flag, and what the flag accepts. */
+const accepts = (spec, value) => typeof value === "string" && !value.startsWith("-") && (typeof spec !== "object" || spec.ok(value));
+
+/**
+ * The launch flags worth keeping, in their original order. A value flag whose
+ * value is missing, looks like another flag or isn't accepted is dropped,
+ * value and all, so nothing rides along as a value that wouldn't pass alone.
+ */
 export function carriedFlags(key, argv = []) {
   const carry = AGENTS[key]?.carry;
   if (!carry) return [];
   const out = [];
   for (let i = argsStart(key, argv); i < argv.length; i++) {
-    const word = argv[i];
+    const word = String(argv[i]);
     const eq = word.indexOf("=");
-    if (word.startsWith("--") && eq > 0 && own(carry, word.slice(0, eq)) && carry[word.slice(0, eq)] >= 1) { out.push(word); continue; }
+    if (word.startsWith("--") && eq > 0 && own(carry, word.slice(0, eq))) {
+      const spec = carry[word.slice(0, eq)];
+      if (arity(spec) >= 1 && accepts(spec, word.slice(eq + 1))) out.push(word);
+      continue;
+    }
     // Own keys only: a first prompt like `constructor` is not a flag.
     if (!own(carry, word)) continue;
+    const spec = carry[word];
+    const n = arity(spec);
+    if (n === 1) {
+      if (!accepts(spec, argv[i + 1])) continue;
+      out.push(word, String(argv[++i]));
+      continue;
+    }
     out.push(word);
-    if (carry[word] === 1 && i + 1 < argv.length) out.push(argv[++i]);
-    if (carry[word] === 2) while (i + 1 < argv.length && !argv[i + 1].startsWith("-")) out.push(argv[++i]);
+    if (n === 2) while (i + 1 < argv.length && accepts(spec, argv[i + 1])) out.push(String(argv[++i]));
   }
   return out;
+}
+
+/**
+ * Flags read back from a label, filtered again as if they were a command line:
+ * a label is not proof that `carriedFlags` wrote it.
+ */
+export function safeFlags(key, flags) {
+  const agent = AGENTS[key];
+  if (!agent || !Array.isArray(flags)) return [];
+  return carriedFlags(key, [agent.bin, ...flags.map(String)]);
 }
 
 /**
@@ -336,7 +421,7 @@ export const shortId = (id) => (id ? String(id).slice(0, 8) : "");
 export function command(rec, kind = "resume") {
   const agent = AGENTS[rec?.agent];
   if (!agent || typeof agent[kind] !== "function" || !validId(rec.session)) return null;
-  const argv = agent[kind](rec.session, rec.flags ?? []);
+  const argv = agent[kind](rec.session, safeFlags(rec.agent, rec.flags ?? []));
   const vars = Object.entries(agentEnv(rec.agent, rec.env ?? {}));
   return vars.length ? ["env", ...vars.map(([k, v]) => `${k}=${v}`), ...argv] : argv;
 }
@@ -358,8 +443,8 @@ export function readRecord(labels) {
   if (!session) return null;
   let flags = [];
   try {
-    const parsed = JSON.parse(get("flags") || "[]");
-    if (Array.isArray(parsed)) flags = parsed.map(String);
+    // Only the flags the agent's carry list lets through, as on the way in.
+    flags = safeFlags(get("agent"), JSON.parse(get("flags") || "[]"));
   } catch { /* a hand-edited label: carry nothing */ }
   let env = {};
   try {
