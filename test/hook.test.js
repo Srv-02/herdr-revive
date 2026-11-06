@@ -8,8 +8,8 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, realpathSync, symlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { parseProcesses, hasTranscript, needsHint } from "../mods/revive/revive.mjs";
-import { hookOwner } from "../mods/revive/lib/core.js";
+import { parseProcesses, hasTranscript } from "../mods/revive/revive.mjs";
+import { hookOwner, needsHint } from "../mods/revive/lib/core.js";
 
 const ENGINE = resolve("mods/revive/revive.mjs");
 const ID = "0c8b28eb-1111-4222-8333-444455556666";

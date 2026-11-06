@@ -9,7 +9,7 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { exec, run, theme, focused, appHome, home, props, closeOverlay, notify } from "herdr";
-import { AGENTS, canFork, command, shortId, ago, shJoin } from "./lib/core.js";
+import { AGENTS, canFork, command, shortId, ago, shJoin, unresumable, needsCommand } from "./lib/core.js";
 
 /**
  * Why a running session can't be forked from here, or null. A fork opens a new
@@ -151,7 +151,7 @@ export default class Revive extends View {
   }
 
   resume(entry, cx) {
-    if (this.busy) return;
+    if (this.busy || unresumable(entry?.rec)) return;
     this.busy = true;
     this.note = null;
     cx.notify();
@@ -196,7 +196,7 @@ export default class Revive extends View {
       if (k === "f") this.fork(entry, "right");
       else if (k === "d") this.fork(entry, "down");
       else if (k === "t") this.fork(entry, "tab");
-    } else if (k === "enter" && NEEDS_YOU.has(entry.state)) this.resume(entry, cx);
+    } else if (k === "enter" && NEEDS_YOU.has(entry.state) && !unresumable(entry.rec)) this.resume(entry, cx);
   }
 
   // ── drawing ──
@@ -217,6 +217,9 @@ export default class Revive extends View {
     const blocked = running && forks ? unforkable(rec) : null;
     const empty = running && (entry.forkable === false || Boolean(blocked));
     const flags = rec.flags?.length ? shJoin(rec.flags) : null;
+    // Resume by hand that the engine would refuse: why, and what to run instead.
+    const stuck = NEEDS_YOU.has(state) ? unresumable(rec) : null;
+    const byHand = stuck?.needs ? needsCommand(rec) : null;
     return v_flex().gap(12).p(14).rounded(12).bg(t.raised).border_1().border_color(t.border)
       .child(h_flex().gap(8).items_center()
         .child(div().text_size(14).font_semibold().text_color(t.foreground).child(agent?.name ?? rec.agent))
@@ -230,14 +233,23 @@ export default class Revive extends View {
           ? "Started before Revive was installed: it can be forked, but won't come back by itself."
           : "Started before Revive was installed: it won't come back by itself.")))
         .when(running && !forks, (el) => el.child(div().text_color(t.dim).child(`${agent?.name ?? rec.agent} can't fork a session.`)))
-        .when(forks && empty, (el) => el.child(div().text_color(t.dim).child(blocked ?? NO_MESSAGE))))
+        .when(forks && empty, (el) => el.child(div().text_color(t.dim).child(blocked ?? NO_MESSAGE)))
+        .when(Boolean(stuck?.folder), (el) => el.child(div().text_color(t.dim)
+          .child(`Its folder ${tilde(stuck.folder)} is missing, not yours, or writable by others, so it isn't resumed here.`)))
+        .when(Boolean(stuck?.needs), (el) => el.child(div().text_color(t.dim)
+          .child(`It ran with ${stuck.needs.join(", ")}, which Revive doesn't carry. ${stuck.needs.some((n) => !n.startsWith("-")) ? "Set it in a shell" : "Fill in the folder"} and run:`)))
+        .when(Boolean(byHand), (el) => el.child(div().text_color(t.muted).font_family("JetBrains Mono").text_size(10.5).child(byHand))))
       .child(h_flex().gap(6).flex_wrap()
         .when(running && forks, (el) => el
           .child(button(t, "fork-right", "Fork right", () => this.fork(entry, "right"), { hint: "F", disabled: empty }))
           .child(button(t, "fork-down", "Fork below", () => this.fork(entry, "down"), { hint: "D", disabled: empty }))
           .child(button(t, "fork-tab", "Fork to a tab", () => this.fork(entry, "tab"), { hint: "T", disabled: empty })))
         .when(NEEDS_YOU.has(state), (el) => el
-          .child(button(t, "resume-here", this.busy ? "Resuming…" : "Resume", (_e, cx) => this.resume(entry, cx), { kind: "solid", hint: "↵", disabled: this.busy }))));
+          .when(Boolean(byHand), (row) => row.child(button(t, "copy-command", "Copy command", (_e, cx) => {
+            cx.write_to_clipboard(byHand);
+            notify({ title: "Copied", body: byHand, level: "success", timeout: 2500 });
+          })))
+          .child(button(t, "resume-here", this.busy ? "Resuming…" : "Resume", (_e, cx) => this.resume(entry, cx), { kind: "solid", hint: "↵", disabled: this.busy || Boolean(stuck) }))));
   }
 
   /**
@@ -278,7 +290,7 @@ export default class Revive extends View {
       .child(badge(t, state))
       .when(!entry.unrecorded, (el) => el.child(button(t, `auto-${i}`, rec.auto ? "Auto" : "Auto off", (_e, cx) => this.setAuto(entry, !rec.auto, cx), { kind: "ghost" })))
       .when(Boolean(entry.unrecorded), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("not remembered")))
-      .when(needs, (el) => el.child(button(t, `resume-${i}`, "Resume", (_e, cx) => this.resume(entry, cx), { kind: "solid", disabled: this.busy })));
+      .when(needs, (el) => el.child(button(t, `resume-${i}`, "Resume", (_e, cx) => this.resume(entry, cx), { kind: "solid", disabled: this.busy || Boolean(unresumable(rec)) })));
   }
 
   setupLine(t) {

@@ -265,3 +265,13 @@ test("a 0.4.0 record with --session-dir in its flags needs it", () => {
   assert.deepEqual(readRecord(labels({ agent: "omp", session: ID, flags: '["--session-dir=/s"]' })).needs, ["--session-dir"]);
   assert.deepEqual(readRecord(labels({ agent: "claude", session: ID, flags: '["--session-dir","/s"]' })).needs, [], "only the agent's own findIn flags");
 });
+
+test("a record that can't be resumed by hand says why, and what to run", async () => {
+  const { unresumable, needsCommand } = await import("../mods/revive/lib/core.js");
+  assert.equal(unresumable({ agent: "claude", session: ID, needs: [] }), null);
+  assert.deepEqual(unresumable({ agent: "claude", session: ID, needs: [], cwdRefused: "/gone" }), { folder: "/gone" });
+  assert.deepEqual(unresumable({ agent: "claude", session: ID, needs: ["CLAUDE_CONFIG_DIR"] }), { needs: ["CLAUDE_CONFIG_DIR"] });
+  assert.equal(needsCommand({ agent: "claude", session: ID, cwd: "/w", flags: [], needs: ["CLAUDE_CONFIG_DIR"] }), `cd -- /w && claude --resume ${ID}`);
+  assert.equal(needsCommand({ agent: "pi", session: ID, cwd: null, flags: [], needs: ["--session-dir"] }), `pi --session-dir <folder> --session ${ID}`);
+  assert.equal(needsCommand({ agent: "nope", session: ID, needs: ["X"] }), null);
+});

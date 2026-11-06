@@ -260,7 +260,9 @@ reboot with either agent.
   It refuses a record with needs too, keeps the record, and names them with the command
   to copy (*Won't resume here: it ran with CODEX_HOME, which Revive doesn't carry. Set it
   and run: cd -- … && codex resume <id>*). Nothing is typed into the terminal in either
-  case. Fork is disabled for both.
+  case. Fork is disabled for both, and so is the dialog's Resume button: the card shows
+  the same reason before a click, and for needs the command with a **Copy command**
+  button. `unresumable(rec)` in `lib/core.js` is the one test both use.
 - `list` checks the transcript only for the focused terminal's running session, the one
   whose card offers Fork. pi's and omp's is the recorded session file. For Claude Code it
   says `forkable: false` only when it is sure: the agent's `sessions/<pid>.json` is in

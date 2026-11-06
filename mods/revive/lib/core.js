@@ -429,6 +429,38 @@ export function command(rec, kind = "resume") {
 }
 
 /**
+ * The command to run by hand for a record with needs: variables are set by
+ * the person; a flag goes right after the agent's name, with a placeholder
+ * for its value, which was never recorded.
+ */
+export function needsCommand(rec) {
+  const argv = command(rec, "resume");
+  if (!argv) return null;
+  const added = rec.needs.filter((n) => n.startsWith("-")).map((f) => ` ${f} <folder>`).join("");
+  const cd = rec.cwd ? `cd -- ${shQuote(rec.cwd)} && ` : "";
+  return `${cd}${shJoin(argv.slice(0, 1))}${added}${argv.length > 1 ? ` ${shJoin(argv.slice(1))}` : ""}`;
+}
+
+/** What to do by hand for a record with needs, as one sentence ending in the command. */
+export function needsHint(rec) {
+  const vars = rec.needs.filter((n) => !n.startsWith("-"));
+  const flags = rec.needs.filter((n) => n.startsWith("-"));
+  const how = [vars.length ? `set ${vars.join(", ")}` : "", flags.length ? `fill in ${flags.join(", ")}` : ""].filter(Boolean).join(" and ");
+  return `${how[0].toUpperCase()}${how.slice(1)}, then run: ${needsCommand(rec)}`;
+}
+
+/**
+ * Why a remembered session isn't resumed by hand, or null: its folder failed
+ * the check (`folder`, the recorded path), or it needs something Revive doesn't
+ * carry (`needs`). The engine refuses these, and the dialog disables Resume.
+ */
+export function unresumable(rec) {
+  if (rec?.cwdRefused) return { folder: rec.cwdRefused };
+  if (rec?.needs?.length) return { needs: rec.needs };
+  return null;
+}
+
+/**
  * The needs the shell doesn't meet: a variable it doesn't set, a `findIn`
  * flag always. The session then isn't resumed by itself.
  */
