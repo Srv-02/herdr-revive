@@ -59,7 +59,7 @@ const claudeEnd = (reason) => (reason === "clear" || reason === "resume" ? "igno
  *   `--hook`, `--config`, `--approve-mcps`, Codex's
  *   `--dangerously-bypass-hook-trust`), extra instructions
  *   (`--system-prompt`, `--append-system-prompt`, `--skill`) and extra
- *   folders (`--add-dir`, omp's `--allow-home`).
+ *   folders (`--add-dir`, omp's `--allow-home`, Cursor's `--workspace`).
  * The agent's `env` variables and `--session-dir` name the folder it loads its
  * settings, hooks, extensions or sessions from. Their values are never taken
  * from a label: a label could name any folder, and a check of that folder
@@ -236,7 +236,9 @@ export const AGENTS = {
   // `agent` is too generic a name, so it counts only under a path that says
   // Cursor (~/.local/share/cursor-agent/versions/…) or with a Cursor report.
   // It has no fork and no `-m` (only --model). `--api-key` and `-H` are never
-  // carried: labels are readable by anything that asks hc.
+  // carried: labels are readable by anything that asks hc. `--workspace` isn't
+  // either: Cursor loads that folder's rules, MCP config and hooks, and the
+  // resume already runs in the recorded folder.
   cursor: {
     name: "Cursor",
     bin: "cursor-agent",
@@ -265,7 +267,6 @@ export const AGENTS = {
       "--sandbox": 1,
       "--mode": 1,
       "--plan": 0,
-      "--workspace": 1,
     },
   },
 };
@@ -339,12 +340,6 @@ const argsStart = (key, argv) => {
 export function isOneShot(key, argv = []) {
   const agent = AGENTS[key];
   return Boolean(agent?.oneShot?.(argv.slice(argsStart(key, argv)).map(String)));
-}
-
-/** The agent's `env` variables that are set in `env`, as an object (empty when none). */
-export function agentEnv(key, env = {}) {
-  const names = AGENTS[key]?.env ?? [];
-  return Object.fromEntries(names.filter((n) => typeof env[n] === "string" && env[n] !== "").map((n) => [n, env[n]]));
 }
 
 const arity = (spec) => (typeof spec === "object" ? spec.arg : spec);
@@ -458,7 +453,8 @@ export function needsOf(key, argv = [], env = {}) {
   if (!agent) return [];
   const words = argv.slice(argsStart(key, argv)).map(String);
   const flags = (agent.findIn ?? []).filter((f) => words.some((w) => w === f || w.startsWith(`${f}=`)));
-  return [...Object.keys(agentEnv(key, env)), ...flags];
+  const set = (agent.env ?? []).filter((n) => typeof env[n] === "string" && env[n] !== "");
+  return [...set, ...flags];
 }
 
 /** A terminal's labels as a record, or null when it carries no session. */
@@ -466,16 +462,20 @@ export function readRecord(labels) {
   const get = (k) => labels?.[PREFIX + k];
   const session = get("session");
   if (!session) return null;
+  const agent = AGENTS[get("agent")];
+  const needs = new Set();
   let flags = [];
   try {
+    const raw = JSON.parse(get("flags") || "[]");
     // Only the flags the agent's carry list lets through, as on the way in.
-    flags = safeFlags(get("agent"), JSON.parse(get("flags") || "[]"));
+    flags = safeFlags(get("agent"), raw);
+    // 0.4.0 carried `--session-dir X` in the flags: such a record needs it.
+    const words = Array.isArray(raw) ? raw.map(String) : [];
+    for (const f of agent?.findIn ?? []) if (words.some((w) => w === f || w.startsWith(`${f}=`))) needs.add(f);
   } catch { /* a hand-edited label: carry nothing */ }
   // Names only, and only those the agent declares. `env`, from earlier
   // versions, held values too: they are not used, its names count as needs.
-  const agent = AGENTS[get("agent")];
   const known = new Set([...(agent?.env ?? []), ...(agent?.findIn ?? [])]);
-  const needs = new Set();
   for (const key of ["needs", "env"]) {
     try {
       const parsed = JSON.parse(get(key) || "[]");
@@ -488,7 +488,6 @@ export function readRecord(labels) {
     session,
     cwd: get("cwd") || null,
     flags,
-    env: {},
     needs: [...needs],
     transcript: get("transcript") || null,
     shell: num(get("shell")),

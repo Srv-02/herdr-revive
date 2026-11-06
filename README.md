@@ -40,14 +40,17 @@ with omp 18.16).
   extensions, plugins or MCP servers (`--settings`, `--mcp-config`, `--plugin-dir`,
   `-e`/`--extension`, `--hook`, `--config`, `--approve-mcps`), extra instructions
   (`--system-prompt`, `--append-system-prompt`, `--skill`) and extra folders (`--add-dir`,
-  omp's `--allow-home`). Folders the agent loads its settings or sessions from are never taken from the record either: for a session
+  omp's `--allow-home`, Cursor's `--workspace`). Folders the agent loads its settings or sessions from are never taken from the record either: for a session
   started under another config folder (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
   `PI_CODING_AGENT_DIR`, …) Revive records only the variable's name. It resumes such a
   session by itself only when the new shell sets that variable on its own (in your rc
   file, say); a session started with pi's or omp's `--session-dir` never resumes by itself.
-  Instead the shell prints a dim line once and the dialog offers the session by hand. The
+  Instead the shell prints a dim line once. The dialog lists the session and shows the
+  command to run in a shell that has what it needs; it doesn't type it itself, and it
+  offers no fork for it. The
   session's working folder is used by its real path, and only when it exists, is yours
-  and is not writable by everyone. The flags are kept in a terminal label, which any
+  and is not writable by everyone; otherwise the session is not resumed at all, not even
+  by hand, since the agent would start in another folder with its flags. The flags are kept in a terminal label, which any
   program that can talk to herdr-core can change, and they run unattended after a reboot;
   so they are filtered again when they are read back, not only when they are recorded.
 - **Fork.** Open the conversation of the focused agent as a new session beside it (right,
@@ -94,6 +97,8 @@ your shell reads at start: `~/.zshrc` for zsh; for bash on macOS the first of
 `~/.bash_profile`, `~/.bash_login` and `~/.profile` that exists (herdr-core starts terminals
 there as login shells, which don't read `~/.bashrc`), and on Linux `~/.bashrc`, since
 herdr-core starts bash there without `-l` ([herdr-core#99](https://github.com/herdrdev/herdr-core/issues/99)).
+Only one bash file keeps the block: a block an earlier version put in another one (a
+Linux login file, say) is taken out.
 zsh is asked where its `.zshrc` is, so a
 `ZDOTDIR` set in `~/.zshenv` is followed. A symlinked file (a dotfiles repository) is
 changed where the link points, and every file keeps its permissions. The first time it
@@ -102,7 +107,7 @@ copy. Running it again
 changes nothing, so it is also how you update the shell block after updating Revive. The
 **Install** button in the dialog does the same. Codex asks you to trust new hooks the next
 time it starts; Droid warns that its hooks changed and shows them in `/hooks`; pi loads the
-extension the next time it starts (or at `/reload`). An extension already at that path (a
+extension the next time it starts (or at `/reload`), omp the next time it starts. An extension already at that path (a
 copy your package manager placed, say) is left as it is, and `uninstall` takes out only the
 link `install` made. `--no-codex`, `--no-pi`, `--no-omp`, `--no-droid` and `--no-cursor` leave that
 agent's files alone. If an agent's file isn't valid JSON, that agent is skipped with a note,

@@ -289,7 +289,7 @@ test("a config folder from a label is never believed", () => {
   const { list, transcript } = listSetup({ ...remembered, "revive.cwd": "/w", "revive.env": JSON.stringify({ CLAUDE_CONFIG_DIR: own }) });
   transcript(own);
   const entry = list()[0];
-  assert.deepEqual(entry.rec.env, {});
+  assert.equal(entry.rec.env, undefined);
   assert.deepEqual(entry.rec.needs, ["CLAUDE_CONFIG_DIR"]);
   assert.notEqual(entry.forkable, true, "the label's folder holding the session proves nothing");
 });
@@ -302,24 +302,53 @@ test("an agent running with nothing on record is listed with its folder", () => 
   assert.equal(entry.folder, "/w");
 });
 
-test("Resume types the command as is, even when run from inside a herdr terminal", () => {
-  // From a terminal, `hc send` would deliver the text as a note (<hc from="t9">…</hc>).
+/** A fake `hc` with one idle shell whose labels remember a session, for `revive.mjs resume`. */
+function resumeSetup(extra = {}) {
   const dir = mkdtempSync(join(tmpdir(), "revive-resume-"));
+  const work = realpathSync(mkdtempSync(join(tmpdir(), "revive-work-")));
   const hc = join(dir, "hc");
+  const labels = { "revive.agent": "codex", "revive.session": ID, "revive.cwd": work, "revive.shell": "1", ...extra };
   writeFileSync(hc, `#!/usr/bin/env node
 const fs = require("fs");
-const [cmd, t, text] = process.argv.slice(2);
+const [cmd, t, ...rest] = process.argv.slice(2);
 if (cmd === "get") console.log(JSON.stringify({ address: t, state: "live", pid: 4242, cwd: "/w",
-  labels: { "revive.agent": "codex", "revive.session": ${JSON.stringify(ID)}, "revive.cwd": "/w", "revive.shell": "1" },
+  labels: ${JSON.stringify(labels)},
   foreground: { pid: 4242, argv: ["zsh"], cwd: "/w" } }));
-else if (cmd === "send") fs.writeFileSync(${JSON.stringify(join(dir, "sent.json"))}, JSON.stringify({ text, from: process.env.HC_TERMINAL_ID ?? null }));
+else if (cmd === "send") fs.writeFileSync(${JSON.stringify(join(dir, "sent.json"))}, JSON.stringify({ text: rest[0], from: process.env.HC_TERMINAL_ID ?? null }));
+else if (cmd === "label") fs.appendFileSync(${JSON.stringify(join(dir, "labels.txt"))}, rest.join(" ") + "\\n");
 `);
   chmodSync(hc, 0o755);
-  execFileSync("node", [ENGINE, "resume", "t1"], { env: { ...base, REVIVE_HC: hc, HC_TERMINAL_ID: "t9" } });
-  const sent = JSON.parse(readFileSync(join(dir, "sent.json"), "utf8"));
-  // /w is not there: the line goes without a cd rather than to a folder nobody checked.
-  assert.equal(sent.text, `codex resume ${ID}`);
-  assert.equal(sent.from, null);
+  const resume = () => {
+    try { execFileSync("node", [ENGINE, "resume", "t1"], { env: { ...base, REVIVE_HC: hc, HC_TERMINAL_ID: "t9" }, stdio: "pipe" }); return null; }
+    catch (err) { return String(err.stderr); }
+  };
+  const read = (name) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : null);
+  return { work, resume, sent: () => JSON.parse(read("sent.json") ?? "null"), labelled: () => read("labels.txt") ?? "" };
+}
+
+test("Resume types the command as is, even when run from inside a herdr terminal", () => {
+  // From a terminal, `hc send` would deliver the text as a note (<hc from="t9">…</hc>).
+  const { work, resume, sent } = resumeSetup();
+  assert.equal(resume(), null);
+  assert.equal(sent().text, `cd -- ${work} && codex resume ${ID}`);
+  assert.equal(sent().from, null);
+});
+
+test("Resume by hand refuses a folder that failed the check, and names it", () => {
+  const { resume, sent } = resumeSetup({ "revive.cwd": "/nonexistent/revive-w" });
+  assert.match(resume(), /Won't resume: its folder \/nonexistent\/revive-w is missing/);
+  assert.equal(sent(), null, "nothing typed: the agent would start elsewhere, with its flags");
+});
+
+test("Resume by hand refuses a session with needs, keeps it and shows the command", () => {
+  for (const extra of [{ "revive.needs": '["CODEX_HOME"]' }, { "revive.agent": "pi", "revive.needs": '["--session-dir"]' }]) {
+    const { resume, sent, labelled } = resumeSetup(extra);
+    const err = resume();
+    assert.match(err, /Won't resume here: it ran with (CODEX_HOME|--session-dir)/);
+    assert.match(err, new RegExp(`(codex resume|pi --session) ${ID}`), "a command to copy");
+    assert.equal(sent(), null);
+    assert.doesNotMatch(labelled(), /revive\.session=(\s|$)/, "the record is not forgotten");
+  }
 });
 
 // ── Factory Droid and Cursor ────────────────────────────────────────────────

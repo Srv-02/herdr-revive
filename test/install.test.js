@@ -174,6 +174,16 @@ test("on Linux bash gets the block in .bashrc: herdr-core starts bash without -l
   assert.ok(!readFileSync(join(linux.home, ".bashrc"), "utf8").includes("herdr-revive"));
 });
 
+test("on Linux an older block in a bash login file moves to .bashrc", () => {
+  const linux = bareHome("linux");
+  // What 0.4.0 left: the block in the login file.
+  writeFileSync(join(linux.home, ".profile"), `export A=1\n${shellBlock(ENGINE)}\n`);
+  const out = linux.run("install", "--bash", "--no-codex");
+  assert.ok(readFileSync(join(linux.home, ".bashrc"), "utf8").includes("herdr-revive"));
+  assert.equal(readFileSync(join(linux.home, ".profile"), "utf8"), "export A=1\n", "the old block is gone, the person's lines stay");
+  assert.match(out, /\.profile/);
+});
+
 test("Claude Code's hook names the engine under $HOME, so a copied settings file works on another machine", () => {
   assert.equal(engineWord("/home/me/.config/herdr-app/mods/revive/revive.mjs", "/home/me"), '"$HOME/.config/herdr-app/mods/revive/revive.mjs"');
   assert.equal(engineWord("/Users/me/my mods/revive.mjs", "/Users/me"), '"$HOME/my mods/revive.mjs"');

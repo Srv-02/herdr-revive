@@ -159,10 +159,10 @@ test("the folder a record names is used only as the person's own, real folder", 
   symlinkSync(work, join(root, "link"));
   const rec = { agent: "omp", session: ID, cwd: join(root, "link") };
   assert.equal(vetRecord(rec).cwd, work, "links resolved: the checked folder is the one used");
-  assert.equal(vetRecord({ ...rec, cwd: join(root, "gone") }).cwdRefused, true);
-  assert.equal(vetRecord(rec, { uid: 999999 }).cwdRefused, true, "another user's folder");
+  assert.equal(vetRecord({ ...rec, cwd: join(root, "gone") }).cwdRefused, join(root, "gone"));
+  assert.equal(vetRecord(rec, { uid: 999999 }).cwdRefused, rec.cwd, "another user's folder");
   chmodSync(work, 0o777);
-  assert.equal(vetRecord(rec).cwdRefused, true, "anyone may write there");
+  assert.equal(vetRecord(rec).cwdRefused, rec.cwd, "anyone may write there");
   chmodSync(work, 0o755);
   assert.equal(shouldResume({ ...readRecord({ "revive.agent": "omp", "revive.session": ID, "revive.shell": "1" }), cwdRefused: true }, { pid: 2, shellPid: 2 }).go, false);
 });

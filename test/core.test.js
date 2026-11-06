@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  agentKey, agentEnv, carriedFlags, isOneShot, validId, command, shQuote, shJoin, readRecord, labelArgs, clearArgs,
+  agentKey, needsOf, carriedFlags, isOneShot, validId, command, shQuote, shJoin, readRecord, labelArgs, clearArgs,
   stateOf, shouldResume, resumeScript, ago,
 } from "../mods/revive/lib/core.js";
 
@@ -69,7 +69,7 @@ test("flags that load code, configuration, instructions or folders are never car
     omp: [["-e", "/x.ts"], ["--extension", "/x.ts"], ["--hook", "/h.ts"], ["--config", "/c.yml"], ["--add-dir", "/"], ["--allow-home"], ["--session-dir", "/s"],
       ["--system-prompt", "x"], ["--system-prompt-template", "x"], ["--append-system-prompt", "x"], ["--api-key", "k"], ["--profile", "../../x"]],
     droid: [["--settings", "/s.json"], ["--append-system-prompt", "x"], ["--append-system-prompt-file", "/p"]],
-    cursor: [["--approve-mcps"], ["--plugin-dir", "/p"], ["--api-key", "k"]],
+    cursor: [["--approve-mcps"], ["--plugin-dir", "/p"], ["--api-key", "k"], ["--workspace", "/tmp/evil"], ["--workspace=/tmp/evil"]],
   };
   for (const [key, cases] of Object.entries(never)) {
     for (const flags of cases) assert.deepEqual(carriedFlags(key, ["x", ...flags]), [], `${key} ${flags.join(" ")}`);
@@ -131,7 +131,7 @@ test("shell quoting survives the shell", () => {
 test("labels read back as a record", () => {
   // `ended` from older versions is read past.
   const rec = readRecord(labels({ agent: "claude", session: ID, cwd: "/w", flags: '["--model","opus"]', shell: 41, at: 5, ended: "other" }));
-  assert.deepEqual(rec, { agent: "claude", session: ID, cwd: "/w", flags: ["--model", "opus"], env: {}, needs: [], transcript: null, shell: 41, since: null, at: 5, resumed: null, failed: null, auto: true });
+  assert.deepEqual(rec, { agent: "claude", session: ID, cwd: "/w", flags: ["--model", "opus"], needs: [], transcript: null, shell: 41, since: null, at: 5, resumed: null, failed: null, auto: true });
   assert.equal(readRecord({}), null);
   assert.equal(readRecord(undefined), null);
   assert.deepEqual(readRecord(labels({ session: ID, flags: "{broken" })).flags, []);
@@ -198,12 +198,12 @@ test("a run that answers and quits is told from a session", () => {
 });
 
 test("a session keeps its agent's config folder, and only that", () => {
-  assert.deepEqual(agentEnv("claude", { CLAUDE_CONFIG_DIR: "/h/.claude-work", CODEX_HOME: "/c", PATH: "/bin" }), { CLAUDE_CONFIG_DIR: "/h/.claude-work" });
-  assert.deepEqual(agentEnv("codex", { CODEX_HOME: "/c" }), { CODEX_HOME: "/c" });
-  assert.deepEqual(agentEnv("claude", { CLAUDE_CONFIG_DIR: "" }), {});
+  assert.deepEqual(needsOf("claude", ["claude"], { CLAUDE_CONFIG_DIR: "/h/.claude-work", CODEX_HOME: "/c", PATH: "/bin" }), ["CLAUDE_CONFIG_DIR"]);
+  assert.deepEqual(needsOf("codex", ["codex"], { CODEX_HOME: "/c" }), ["CODEX_HOME"]);
+  assert.deepEqual(needsOf("claude", ["claude"], { CLAUDE_CONFIG_DIR: "" }), []);
   // Older records held values: neither they nor a variable the agent doesn't declare are used.
   const rec = readRecord(labels({ agent: "claude", session: ID, env: JSON.stringify({ CLAUDE_CONFIG_DIR: "/h/my work", LD_PRELOAD: "/evil.so" }) }));
-  assert.deepEqual(rec.env, {});
+  assert.equal("env" in rec, false);
   assert.deepEqual(rec.needs, ["CLAUDE_CONFIG_DIR"]);
   assert.deepEqual(command(rec), ["claude", "--resume", ID]);
   assert.deepEqual(command(rec, "fork"), ["claude", "--resume", ID, "--fork-session"]);
@@ -255,4 +255,13 @@ test("ago", () => {
   assert.equal(ago(0 + 1, 1 + 5 * 60_000), "5m ago");
   assert.equal(ago(1, 1 + 3 * 3600_000), "3h ago");
   assert.equal(ago(1, 1 + 2 * 86400_000), "2d ago");
+});
+
+test("a 0.4.0 record with --session-dir in its flags needs it", () => {
+  const rec = readRecord(labels({ agent: "pi", session: ID, flags: '["--session-dir","/s","--model","m"]' }));
+  assert.deepEqual(rec.flags, ["--model", "m"]);
+  assert.deepEqual(rec.needs, ["--session-dir"]);
+  assert.equal(shouldResume(rec, { pid: 2, shellPid: 2, env: {} }).go, false);
+  assert.deepEqual(readRecord(labels({ agent: "omp", session: ID, flags: '["--session-dir=/s"]' })).needs, ["--session-dir"]);
+  assert.deepEqual(readRecord(labels({ agent: "claude", session: ID, flags: '["--session-dir","/s"]' })).needs, [], "only the agent's own findIn flags");
 });

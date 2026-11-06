@@ -25,7 +25,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
-  AGENTS, agentKey, agentEnv, carriedFlags, hookOwner, hookPayload, endAction, isOneShot, readRecord, labelArgs, clearArgs, resumedArgs,
+  AGENTS, agentKey, carriedFlags, hookOwner, hookPayload, endAction, isOneShot, readRecord, labelArgs, clearArgs, resumedArgs,
   stateOf, shouldResume, resumeScript, resumeLine, shQuote, validId, needsOf, shortId,
 } from "./lib/core.js";
 import { agentDirs, findSession } from "./lib/sessions.js";
@@ -189,8 +189,8 @@ async function hook(args = []) {
 /**
  * A record read from labels, with its folder checked on disk: `cd` goes to
  * the folder's real path, and only to an existing folder that belongs to this
- * user and that others can't write to. Otherwise `cwdRefused` stops an
- * automatic resume (the dialog still offers it by hand).
+ * user and that others can't write to. Otherwise `cwdRefused` names the
+ * recorded folder, and neither an automatic resume nor one by hand runs.
  */
 export function vetRecord(rec, { uid = process.getuid?.() } = {}) {
   if (!rec?.cwd) return rec;
@@ -199,7 +199,7 @@ export function vetRecord(rec, { uid = process.getuid?.() } = {}) {
     const st = statSync(real);
     if (st.isDirectory() && (uid === undefined || st.uid === uid) && (st.mode & 0o002) === 0) return { ...rec, cwd: real };
   } catch { /* gone */ }
-  return { ...rec, cwd: null, cwdRefused: true };
+  return { ...rec, cwd: null, cwdRefused: rec.cwd };
 }
 
 const loadRecord = (labels) => vetRecord(readRecord(labels));
@@ -212,10 +212,10 @@ const claudeDir = (env = process.env) => env.CLAUDE_CONFIG_DIR || join(homedir()
  * Claude Code writes a session's transcript only once it has a message, so a
  * session opened and left empty can't be resumed: `--resume` says "No
  * conversation found". Its folder is named after the cwd; other folders are
- * searched when the agent moved. Codex is not checked. The folder is the
- * session's own `CLAUDE_CONFIG_DIR` when it was recorded with one, not this
- * shell's. Records from before Revive kept it fall back to this shell's.
- * pi does the same; its record names the file, which is all there is to check.
+ * searched when the agent moved. Codex is not checked. Only this process's
+ * `CLAUDE_CONFIG_DIR` is searched: a record with needs is never checked here
+ * (see `resume`). pi and omp do the same; their record names the file, which
+ * is all there is to check.
  */
 export function hasTranscript(rec) {
   if (EXTENSION_AGENTS.includes(rec.agent)) return !rec.transcript || existsSync(rec.transcript);
@@ -343,6 +343,13 @@ async function resume(args) {
   }
   const line = resumeLine(rec);
   if (!line) throw new Error(`Can't build a resume command for ${t}.`);
+  // Not sent without its folder: the agent would start elsewhere, with its flags.
+  if (rec.cwdRefused) throw new Error(`Won't resume: its folder ${tilde(rec.cwdRefused)} is missing, not yours, or writable by others.`);
+  // Not sent without what it needs, and not forgotten: its sessions are
+  // somewhere this shell may not look. The person runs it where that is set.
+  if (rec.needs.length) {
+    throw new Error(`Won't resume here: it ran with ${rec.needs.join(", ")}, which Revive doesn't carry. Set it and run: ${line}`);
+  }
   if (!hasTranscript(rec)) {
     await label(t, clearArgs());
     throw new Error("That session never got a message, so there is nothing to resume. Forgot it.");
@@ -697,7 +704,8 @@ function install(args, remove = false) {
     try {
       if (linkExtension(key, remove)) {
         changed.push(extensionPath(key));
-        if (!remove) notes.push(`${AGENTS[key].name} loads the extension the next time it starts (or at /reload).`);
+        // omp loads extensions only at start (its docs: modules are never re-evaluated).
+        if (!remove) notes.push(`${AGENTS[key].name} loads the extension the next time it starts${key === "pi" ? " (or at /reload)" : ""}.`);
       }
     } catch (err) { warnings.push(err.message); }
   }
@@ -705,6 +713,15 @@ function install(args, remove = false) {
     for (const rc of remove ? ALL_RC() : shells(args).map((s) => RC[s]())) {
       if (remove && !existsSync(rc)) continue;
       if (save(rc, withShellBlock(readText(rc), { remove }))) changed.push(rc);
+    }
+    // An earlier version put bash's block into another file (a login file,
+    // on Linux): only one bash file keeps it.
+    if (!remove && shells(args).includes("bash")) {
+      const keep = RC.bash();
+      for (const rc of [...BASH_LOGIN.map((f) => join(homedir(), f)), join(homedir(), ".bashrc")]) {
+        if (rc === keep || !existsSync(rc) || !readText(rc).includes(BEGIN)) continue;
+        if (save(rc, withShellBlock(readText(rc), { remove: true }))) changed.push(rc);
+      }
     }
   }
   process.stdout.write(changed.length ? `${remove ? "Removed from" : "Updated"}:\n${changed.map((p) => `  ${p}`).join("\n")}\n` : "Nothing to change.\n");
