@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  agentKey, agentEnv, carriedFlags, isOneShot, validId, command, shQuote, shJoin, readRecord, labelArgs, clearArgs,
+  agentKey, needsOf, carriedFlags, isOneShot, validId, command, shQuote, shJoin, readRecord, labelArgs, clearArgs,
   stateOf, shouldResume, resumeScript, ago,
 } from "../mods/revive/lib/core.js";
 
@@ -28,22 +28,58 @@ test("agents are known by their report or their command line", () => {
 
 test("only the launch flags worth keeping are carried, values included", () => {
   assert.deepEqual(
-    carriedFlags("claude", ["claude", "--dangerously-skip-permissions", "--model", "haiku", "--resume", "x", "fix the bug"]),
-    ["--dangerously-skip-permissions", "--model", "haiku"],
+    carriedFlags("claude", ["claude", "--permission-mode", "plan", "--model", "haiku", "--resume", "x", "fix the bug"]),
+    ["--permission-mode", "plan", "--model", "haiku"],
   );
   assert.deepEqual(carriedFlags("claude", ["claude", "--model=opus", "-p", "hi"]), ["--model=opus"]);
-  assert.deepEqual(carriedFlags("codex", ["node", "/x/codex", "--no-daemon", "-m", "gpt-5", "--yolo", "task"]), ["--no-daemon", "-m", "gpt-5", "--yolo"]);
-  assert.deepEqual(carriedFlags("claude", ["claude", "--model"]), ["--model"]);
+  assert.deepEqual(carriedFlags("codex", ["node", "/x/codex", "--no-daemon", "-m", "gpt-5", "-s", "workspace-write", "task"]), ["--no-daemon", "-m", "gpt-5", "-s", "workspace-write"]);
+  // A value flag without its value is dropped, not carried bare.
+  assert.deepEqual(carriedFlags("claude", ["claude", "--model"]), []);
   assert.deepEqual(carriedFlags("nope", ["x", "--model", "y"]), []);
   assert.deepEqual(
     carriedFlags("pi", ["pi", "--provider", "anthropic", "--model", "sonnet", "--thinking", "high", "-t", "read,bash", "-e", "/x/ext.ts", "--session", "x", "fix it"]),
-    ["--provider", "anthropic", "--model", "sonnet", "--thinking", "high", "-t", "read,bash", "-e", "/x/ext.ts"],
+    ["--provider", "anthropic", "--model", "sonnet", "--thinking", "high", "-t", "read,bash"],
   );
 });
 
-test("--add-dir keeps every folder it was given", () => {
-  assert.deepEqual(carriedFlags("claude", ["claude", "--add-dir", "../lib", "../shared", "--model", "opus"]), ["--add-dir", "../lib", "../shared", "--model", "opus"]);
-  assert.deepEqual(carriedFlags("claude", ["claude", "--add-dir=../lib"]), ["--add-dir=../lib"]);
+test("permission and sandbox modes come back as they ran", () => {
+  const same = {
+    claude: [["--dangerously-skip-permissions"], ["--allow-dangerously-skip-permissions"], ["--permission-mode", "bypassPermissions"], ["--permission-mode=bypassPermissions"]],
+    codex: [["--dangerously-bypass-approvals-and-sandbox"], ["--yolo"], ["--full-auto"], ["--approve-for-me"], ["-a", "never"], ["--ask-for-approval", "never"],
+      ["-s", "danger-full-access"], ["--sandbox=danger-full-access"]],
+    pi: [["-a"], ["--approve"]],
+    omp: [["--auto-approve"], ["--approval-mode", "yolo"], ["--approval-mode=yolo"], ["--plan-yolo"]],
+    droid: [["--auto", "high"]],
+    cursor: [["-f"], ["--force"], ["--yolo"], ["--sandbox", "disabled"]],
+  };
+  for (const [key, cases] of Object.entries(same)) {
+    for (const flags of cases) assert.deepEqual(carriedFlags(key, ["x", ...flags]), flags, `${key} ${flags.join(" ")}`);
+  }
+  // Read back from a label, too.
+  assert.deepEqual(readRecord(labels({ agent: "codex", session: ID, flags: '["--dangerously-bypass-approvals-and-sandbox","-s","danger-full-access"]' })).flags,
+    ["--dangerously-bypass-approvals-and-sandbox", "-s", "danger-full-access"]);
+});
+
+test("flags that load code, configuration, instructions or folders are never carried", () => {
+  const never = {
+    claude: [["--settings", "/s.json"], ["--settings={\"hooks\":{}}"], ["--mcp-config", "/m.json"], ["--plugin-dir", "/p"], ["--add-dir", "/"], ["--add-dir=/"],
+      ["--append-system-prompt", "x"], ["--system-prompt", "x"]],
+    codex: [["-c", "x=y"], ["--config", "x=y"], ["--dangerously-bypass-hook-trust"], ["--profile", "../x"]],
+    pi: [["-e", "/x.ts"], ["--extension", "/x.ts"], ["--skill", "/s"], ["--system-prompt", "x"], ["--append-system-prompt", "x"], ["--session-dir", "/s"]],
+    omp: [["-e", "/x.ts"], ["--extension", "/x.ts"], ["--hook", "/h.ts"], ["--config", "/c.yml"], ["--add-dir", "/"], ["--allow-home"], ["--session-dir", "/s"],
+      ["--system-prompt", "x"], ["--system-prompt-template", "x"], ["--append-system-prompt", "x"], ["--api-key", "k"], ["--profile", "../../x"]],
+    droid: [["--settings", "/s.json"], ["--append-system-prompt", "x"], ["--append-system-prompt-file", "/p"]],
+    cursor: [["--approve-mcps"], ["--plugin-dir", "/p"], ["--api-key", "k"], ["--workspace", "/tmp/evil"], ["--workspace=/tmp/evil"]],
+  };
+  for (const [key, cases] of Object.entries(never)) {
+    for (const flags of cases) assert.deepEqual(carriedFlags(key, ["x", ...flags]), [], `${key} ${flags.join(" ")}`);
+  }
+});
+
+test("a value that looks like a flag is not taken as a value", () => {
+  // `--model --settings /s.json` must not carry --settings as the model's value.
+  assert.deepEqual(carriedFlags("claude", ["claude", "--model", "--settings", "/s.json", "--agent", "rev"]), ["--agent", "rev"]);
+  assert.deepEqual(carriedFlags("omp", ["omp", "--model", "-e", "/x.ts"]), []);
 });
 
 test("a first prompt named like an object's own property is not a flag", () => {
@@ -78,7 +114,8 @@ test("resume and fork commands per agent", () => {
   assert.deepEqual(command({ agent: "codex", session: ID, flags: [] }, "fork"), ["codex", "fork", ID]);
   assert.deepEqual(command({ agent: "pi", session: ID, flags: ["--model", "sonnet"] }, "resume"), ["pi", "--model", "sonnet", "--session", ID]);
   assert.deepEqual(command({ agent: "pi", session: ID, flags: [] }, "fork"), ["pi", "--fork", ID]);
-  assert.deepEqual(command({ agent: "pi", session: ID, env: { PI_CODING_AGENT_DIR: "/p" } }), ["env", "PI_CODING_AGENT_DIR=/p", "pi", "--session", ID]);
+  // A config folder is never set from a record: the resuming shell's own counts.
+  assert.deepEqual(command({ agent: "pi", session: ID, env: { PI_CODING_AGENT_DIR: "/p" } }), ["pi", "--session", ID]);
   assert.equal(command({ agent: "claude", session: "x y" }), null);
   assert.equal(command({ agent: "vim", session: ID }), null);
   assert.equal(command(null), null);
@@ -94,10 +131,15 @@ test("shell quoting survives the shell", () => {
 test("labels read back as a record", () => {
   // `ended` from older versions is read past.
   const rec = readRecord(labels({ agent: "claude", session: ID, cwd: "/w", flags: '["--model","opus"]', shell: 41, at: 5, ended: "other" }));
-  assert.deepEqual(rec, { agent: "claude", session: ID, cwd: "/w", flags: ["--model", "opus"], env: {}, transcript: null, shell: 41, since: null, at: 5, resumed: null, failed: null, auto: true });
+  assert.deepEqual(rec, { agent: "claude", session: ID, cwd: "/w", flags: ["--model", "opus"], needs: [], transcript: null, shell: 41, since: null, at: 5, resumed: null, failed: null, auto: true });
   assert.equal(readRecord({}), null);
   assert.equal(readRecord(undefined), null);
   assert.deepEqual(readRecord(labels({ session: ID, flags: "{broken" })).flags, []);
+  // Flags read back pass the carry list again: a label is not proof Revive wrote it.
+  assert.deepEqual(readRecord(labels({ agent: "claude", session: ID, flags: '["--dangerously-skip-permissions","--settings","/s.json","--model","opus","--mcp-config","/m.json"]' })).flags, ["--dangerously-skip-permissions", "--model", "opus"]);
+  assert.deepEqual(readRecord(labels({ agent: "omp", session: ID, flags: '["-e","/x.ts","--model","opus","--hook","/h.ts"]' })).flags, ["--model", "opus"]);
+  assert.deepEqual(readRecord(labels({ session: ID, flags: '["--model","opus"]' })).flags, [], "no agent, no carry list");
+  assert.deepEqual(readRecord(labels({ agent: "claude", session: ID, flags: '{"0":"--settings"}' })).flags, []);
   assert.equal(readRecord(labels({ session: ID, auto: "off" })).auto, false);
 });
 
@@ -156,15 +198,18 @@ test("a run that answers and quits is told from a session", () => {
 });
 
 test("a session keeps its agent's config folder, and only that", () => {
-  assert.deepEqual(agentEnv("claude", { CLAUDE_CONFIG_DIR: "/h/.claude-work", CODEX_HOME: "/c", PATH: "/bin" }), { CLAUDE_CONFIG_DIR: "/h/.claude-work" });
-  assert.deepEqual(agentEnv("codex", { CODEX_HOME: "/c" }), { CODEX_HOME: "/c" });
-  assert.deepEqual(agentEnv("claude", { CLAUDE_CONFIG_DIR: "" }), {});
+  assert.deepEqual(needsOf("claude", ["claude"], { CLAUDE_CONFIG_DIR: "/h/.claude-work", CODEX_HOME: "/c", PATH: "/bin" }), ["CLAUDE_CONFIG_DIR"]);
+  assert.deepEqual(needsOf("codex", ["codex"], { CODEX_HOME: "/c" }), ["CODEX_HOME"]);
+  assert.deepEqual(needsOf("claude", ["claude"], { CLAUDE_CONFIG_DIR: "" }), []);
+  // Older records held values: neither they nor a variable the agent doesn't declare are used.
   const rec = readRecord(labels({ agent: "claude", session: ID, env: JSON.stringify({ CLAUDE_CONFIG_DIR: "/h/my work", LD_PRELOAD: "/evil.so" }) }));
-  assert.deepEqual(rec.env, { CLAUDE_CONFIG_DIR: "/h/my work" }, "a variable the agent doesn't declare is dropped");
-  assert.deepEqual(command(rec), ["env", "CLAUDE_CONFIG_DIR=/h/my work", "claude", "--resume", ID]);
-  assert.deepEqual(command(rec, "fork"), ["env", "CLAUDE_CONFIG_DIR=/h/my work", "claude", "--resume", ID, "--fork-session"]);
-  assert.match(resumeScript({ ...rec, cwd: "/w" }, "/e"), /env 'CLAUDE_CONFIG_DIR=\/h\/my work' claude --resume/);
-  assert.deepEqual(readRecord(labels({ agent: "claude", session: ID, env: "{broken" })).env, {});
+  assert.equal("env" in rec, false);
+  assert.deepEqual(rec.needs, ["CLAUDE_CONFIG_DIR"]);
+  assert.deepEqual(command(rec), ["claude", "--resume", ID]);
+  assert.deepEqual(command(rec, "fork"), ["claude", "--resume", ID, "--fork-session"]);
+  assert.doesNotMatch(resumeScript({ ...rec, cwd: "/w" }, "/e"), /CLAUDE_CONFIG_DIR/);
+  assert.deepEqual(readRecord(labels({ agent: "claude", session: ID, env: "{broken" })).needs, []);
+  assert.deepEqual(readRecord(labels({ agent: "claude", session: ID, needs: '["CLAUDE_CONFIG_DIR","LD_PRELOAD","--settings"]' })).needs, ["CLAUDE_CONFIG_DIR"]);
   assert.deepEqual(command(readRecord(labels({ agent: "claude", session: ID }))), ["claude", "--resume", ID], "no variables, no env");
 });
 
@@ -210,4 +255,13 @@ test("ago", () => {
   assert.equal(ago(0 + 1, 1 + 5 * 60_000), "5m ago");
   assert.equal(ago(1, 1 + 3 * 3600_000), "3h ago");
   assert.equal(ago(1, 1 + 2 * 86400_000), "2d ago");
+});
+
+test("a 0.4.0 record with --session-dir in its flags needs it", () => {
+  const rec = readRecord(labels({ agent: "pi", session: ID, flags: '["--session-dir","/s","--model","m"]' }));
+  assert.deepEqual(rec.flags, ["--model", "m"]);
+  assert.deepEqual(rec.needs, ["--session-dir"]);
+  assert.equal(shouldResume(rec, { pid: 2, shellPid: 2, env: {} }).go, false);
+  assert.deepEqual(readRecord(labels({ agent: "omp", session: ID, flags: '["--session-dir=/s"]' })).needs, ["--session-dir"]);
+  assert.deepEqual(readRecord(labels({ agent: "claude", session: ID, flags: '["--session-dir","/s"]' })).needs, [], "only the agent's own findIn flags");
 });

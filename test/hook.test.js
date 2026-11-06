@@ -5,10 +5,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, realpathSync, symlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { parseProcesses, hasTranscript } from "../mods/revive/revive.mjs";
+import { parseProcesses, hasTranscript, needsHint } from "../mods/revive/revive.mjs";
 import { hookOwner } from "../mods/revive/lib/core.js";
 
 const ENGINE = resolve("mods/revive/revive.mjs");
@@ -93,10 +93,12 @@ test("a `claude -p` typed in the terminal leaves the remembered session alone", 
   assert.deepEqual(calls(), []);
 });
 
-test("the session's config folder is remembered with it", () => {
+test("a session's own config folder is remembered by name", () => {
   const { run, calls, set } = setup();
   run(start, { env: { CLAUDE_CONFIG_DIR: "/h/.claude-work", CODEX_HOME: "/c" } });
-  assert.equal(set(calls())["revive.env"], '{"CLAUDE_CONFIG_DIR":"/h/.claude-work"}');
+  // Its name only: a label must not choose the folder a resume loads settings from.
+  assert.equal(set(calls())["revive.needs"], '["CLAUDE_CONFIG_DIR"]');
+  assert.equal(set(calls())["revive.env"], "");
 });
 
 test("a session without a config folder clears an older one's", () => {
@@ -204,13 +206,20 @@ test("a new session starts without a resumed mark", () => {
   assert.equal(got["revive.resumed"], "");
 });
 
-test("a transcript is looked for in the session's own config folder", () => {
+test("a transcript is looked for in the engine's own config folder, never a record's", () => {
   const work = mkdtempSync(join(tmpdir(), "revive-config-"));
   mkdirSync(join(work, "projects", "-w"), { recursive: true });
   writeFileSync(join(work, "projects", "-w", `${ID}.jsonl`), "{}\n");
   const rec = { agent: "claude", session: ID, cwd: "/w", env: { CLAUDE_CONFIG_DIR: work } };
-  assert.equal(hasTranscript(rec), true);
-  assert.equal(hasTranscript({ ...rec, env: { CLAUDE_CONFIG_DIR: mkdtempSync(join(tmpdir(), "revive-empty-")) } }), false);
+  const saved = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "revive-empty-"));
+    assert.equal(hasTranscript(rec), false);
+    process.env.CLAUDE_CONFIG_DIR = work;
+    assert.equal(hasTranscript({ ...rec, env: {} }), true);
+  } finally {
+    if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = saved;
+  }
 });
 
 test("pi's flags and session file come from its extension, since ps shows only `pi`", () => {
@@ -221,7 +230,7 @@ test("pi's flags and session file come from its extension, since ps shows only `
   assert.equal(got["revive.agent"], "pi");
   assert.equal(got["revive.flags"], '["--model","sonnet","--thinking","high"]');
   assert.equal(got["revive.transcript"], file);
-  assert.equal(got["revive.env"], '{"PI_CODING_AGENT_DIR":"/h/.pi-work"}');
+  assert.equal(got["revive.needs"], '["PI_CODING_AGENT_DIR"]');
 });
 
 test("a pi session is resumable once its file exists", () => {
@@ -275,12 +284,14 @@ test("a fork isn't blocked when the session's config folder isn't known", () => 
   assert.equal(list()[0].forkable, null);
 });
 
-test("a record's own config folder settles whether it can be forked", () => {
+test("a config folder from a label is never believed", () => {
   const own = mkdtempSync(join(tmpdir(), "revive-own-"));
   const { list, transcript } = listSetup({ ...remembered, "revive.cwd": "/w", "revive.env": JSON.stringify({ CLAUDE_CONFIG_DIR: own }) });
-  assert.equal(list()[0].forkable, false);
   transcript(own);
-  assert.equal(list()[0].forkable, true);
+  const entry = list()[0];
+  assert.equal(entry.rec.env, undefined);
+  assert.deepEqual(entry.rec.needs, ["CLAUDE_CONFIG_DIR"]);
+  assert.notEqual(entry.forkable, true, "the label's folder holding the session proves nothing");
 });
 
 test("an agent running with nothing on record is listed with its folder", () => {
@@ -291,23 +302,59 @@ test("an agent running with nothing on record is listed with its folder", () => 
   assert.equal(entry.folder, "/w");
 });
 
-test("Resume types the command as is, even when run from inside a herdr terminal", () => {
-  // From a terminal, `hc send` would deliver the text as a note (<hc from="t9">…</hc>).
+/** A fake `hc` with one idle shell whose labels remember a session, for `revive.mjs resume`. */
+function resumeSetup(extra = {}) {
   const dir = mkdtempSync(join(tmpdir(), "revive-resume-"));
+  const work = realpathSync(mkdtempSync(join(tmpdir(), "revive-work-")));
   const hc = join(dir, "hc");
+  const labels = { "revive.agent": "codex", "revive.session": ID, "revive.cwd": work, "revive.shell": "1", ...extra };
   writeFileSync(hc, `#!/usr/bin/env node
 const fs = require("fs");
-const [cmd, t, text] = process.argv.slice(2);
+const [cmd, t, ...rest] = process.argv.slice(2);
 if (cmd === "get") console.log(JSON.stringify({ address: t, state: "live", pid: 4242, cwd: "/w",
-  labels: { "revive.agent": "codex", "revive.session": ${JSON.stringify(ID)}, "revive.cwd": "/w", "revive.shell": "1" },
+  labels: ${JSON.stringify(labels)},
   foreground: { pid: 4242, argv: ["zsh"], cwd: "/w" } }));
-else if (cmd === "send") fs.writeFileSync(${JSON.stringify(join(dir, "sent.json"))}, JSON.stringify({ text, from: process.env.HC_TERMINAL_ID ?? null }));
+else if (cmd === "send") fs.writeFileSync(${JSON.stringify(join(dir, "sent.json"))}, JSON.stringify({ text: rest[0], from: process.env.HC_TERMINAL_ID ?? null }));
+else if (cmd === "label") fs.appendFileSync(${JSON.stringify(join(dir, "labels.txt"))}, rest.join(" ") + "\\n");
 `);
   chmodSync(hc, 0o755);
-  execFileSync("node", [ENGINE, "resume", "t1"], { env: { ...base, REVIVE_HC: hc, HC_TERMINAL_ID: "t9" } });
-  const sent = JSON.parse(readFileSync(join(dir, "sent.json"), "utf8"));
-  assert.equal(sent.text, `cd -- /w && codex resume ${ID}`);
-  assert.equal(sent.from, null);
+  const resume = () => {
+    try { execFileSync("node", [ENGINE, "resume", "t1"], { env: { ...base, REVIVE_HC: hc, HC_TERMINAL_ID: "t9" }, stdio: "pipe" }); return null; }
+    catch (err) { return String(err.stderr); }
+  };
+  const read = (name) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : null);
+  return { work, resume, sent: () => JSON.parse(read("sent.json") ?? "null"), labelled: () => read("labels.txt") ?? "" };
+}
+
+test("Resume types the command as is, even when run from inside a herdr terminal", () => {
+  // From a terminal, `hc send` would deliver the text as a note (<hc from="t9">…</hc>).
+  const { work, resume, sent } = resumeSetup();
+  assert.equal(resume(), null);
+  assert.equal(sent().text, `cd -- ${work} && codex resume ${ID}`);
+  assert.equal(sent().from, null);
+});
+
+test("Resume by hand refuses a folder that failed the check, and names it", () => {
+  const { resume, sent } = resumeSetup({ "revive.cwd": "/nonexistent/revive-w" });
+  assert.match(resume(), /Won't resume: its folder \/nonexistent\/revive-w is missing/);
+  assert.equal(sent(), null, "nothing typed: the agent would start elsewhere, with its flags");
+});
+
+test("Resume by hand refuses a session with needs, keeps it and shows the command", () => {
+  for (const extra of [{ "revive.needs": '["CODEX_HOME"]' }, { "revive.agent": "pi", "revive.needs": '["--session-dir"]' }]) {
+    const { resume, sent, labelled } = resumeSetup(extra);
+    const err = resume();
+    assert.match(err, /Won't resume here: it ran with (CODEX_HOME|--session-dir)/);
+    assert.match(err, new RegExp(`Set CODEX_HOME, then run: cd -- \\S+ && codex resume ${ID}|Fill in --session-dir, then run: cd -- \\S+ && pi --session-dir <folder> --session ${ID}`), "a command to copy");
+    assert.equal(sent(), null);
+    assert.doesNotMatch(labelled(), /revive\.session=(\s|$)/, "the record is not forgotten");
+  }
+});
+
+test("the hand-resume hint puts an uncarried flag after the agent's name, with a placeholder", () => {
+  const rec = { agent: "pi", session: ID, cwd: "/w x", flags: ["--model", "m"], needs: ["PI_CODING_AGENT_DIR", "--session-dir"] };
+  assert.equal(needsHint(rec), `Set PI_CODING_AGENT_DIR and fill in --session-dir, then run: cd -- '/w x' && pi --session-dir <folder> --model m --session ${ID}`);
+  assert.equal(needsHint({ agent: "claude", session: ID, cwd: null, flags: [], needs: ["CLAUDE_CONFIG_DIR"] }), `Set CLAUDE_CONFIG_DIR, then run: claude --resume ${ID}`);
 });
 
 // ── Factory Droid and Cursor ────────────────────────────────────────────────
@@ -358,4 +405,49 @@ test("Cursor's completed session is forgotten; an aborted one is kept", () => {
   const aborted = setup({ ...cursor, labels: { ...remembered, "revive.agent": "cursor" } });
   aborted.run(cursorEnd("aborted"));
   assert.deepEqual(aborted.calls(), []);
+});
+
+test("omp's SessionStart is remembered with the command line its extension sends", () => {
+  // omp renames its process `omp`: the foreground shows no flags.
+  const { run, calls, set } = setup({ bin: "omp", argv: ["omp"], app: "omp" });
+  const transcript = `/home/me/.omp/agent/sessions/-w/2026-01-01T00-00-00-000Z_${ID}.jsonl`;
+  run({ ...start, transcript_path: transcript, argv: ["omp", "--model", "opus", "-e", "/x.ts", "fix it"] });
+  const got = set(calls());
+  assert.equal(got["revive.agent"], "omp");
+  assert.equal(got["revive.session"], ID);
+  assert.equal(got["revive.flags"], '["--model","opus"]');
+  assert.equal(got["revive.transcript"], transcript);
+});
+
+test("check resumes into the folder's real path, and only hints at a session it can't resume by itself", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "revive-check-")));
+  const work = join(dir, "work");
+  mkdirSync(work);
+  symlinkSync(work, join(dir, "link"));
+  const config = join(dir, "config");
+  mkdirSync(join(config, "projects", work.replace(/[^A-Za-z0-9]/g, "-")), { recursive: true });
+  writeFileSync(join(config, "projects", work.replace(/[^A-Za-z0-9]/g, "-"), `${ID}.jsonl`), "{}\n");
+  const check = (labels, env = { CLAUDE_CONFIG_DIR: config }) => {
+    writeFileSync(join(dir, "labels.json"), JSON.stringify(labels));
+    rmSync(join(dir, "label.log"), { force: true });
+    writeFileSync(join(dir, "hc"), `#!/usr/bin/env node
+const fs = require("fs"); const [cmd, t, ...rest] = process.argv.slice(2);
+if (cmd === "get") console.log(JSON.stringify({ address: t, state: "live", pid: 4242, labels: JSON.parse(fs.readFileSync(${JSON.stringify(join(dir, "labels.json"))}, "utf8")) }));
+else if (cmd === "label") fs.appendFileSync(${JSON.stringify(join(dir, "label.log"))}, rest.join(" ") + "\\n");
+`);
+    chmodSync(join(dir, "hc"), 0o755);
+    const out = execFileSync("node", [ENGINE, "check", "--shell", "4242"], { encoding: "utf8", env: { ...base, REVIVE_HC: join(dir, "hc"), HC_TERMINAL_ID: "t1", ...env } });
+    return { out, labelled: existsSync(join(dir, "label.log")) ? readFileSync(join(dir, "label.log"), "utf8") : "" };
+  };
+  const rec = { "revive.agent": "claude", "revive.session": ID, "revive.shell": "1", "revive.cwd": join(dir, "link") };
+  const ok = check(rec);
+  assert.match(ok.out, new RegExp(`cd -- ${work.replace(/[/.]/g, "\\$&")} && claude --resume ${ID}`));
+  // The shell sets the variable itself: its own folder, so the need is met.
+  assert.match(check({ ...rec, "revive.needs": '["CLAUDE_CONFIG_DIR"]' }).out, /claude --resume/);
+  const hinted = check({ ...rec, "revive.needs": '["CLAUDE_CONFIG_DIR"]' }, {});
+  assert.doesNotMatch(hinted.out, /--resume/);
+  assert.match(hinted.out, /not resuming Claude Code session .*CLAUDE_CONFIG_DIR/);
+  assert.match(hinted.labelled, /revive\.failed=\d+/, "said once: the next shell stays quiet");
+  const gone = check({ ...rec, "revive.cwd": join(dir, "gone") });
+  assert.match(gone.out, /folder is missing or not yours/);
 });

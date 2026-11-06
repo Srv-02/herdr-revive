@@ -18,21 +18,41 @@ Requires the **Herdr desktop app 0.1.9+**, **Node 20+**, and **Claude Code**. Co
 [Cursor CLI](https://cursor.com/docs/cli/overview) (`cursor-agent`) are supported too, but
 experimental: see [Limits](#limits). [pi](https://pi.dev) support is experimental and
 community-maintained (tested with pi 1.4; pi issues: ping @llehouerou).
+[oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`) support is experimental (tested
+with omp 18.16).
 
 ## Features
 
 - **Automatic resume.** After a reboot or a core restart, the pane's new shell runs
-  `claude --resume <id>` (or `pi --session <id>`, `codex resume <id>`, `droid --resume <id>`,
+  `claude --resume <id>` (or `pi --session <id>`, `omp --resume <id>`, `codex resume <id>`, `droid --resume <id>`,
   `cursor-agent --resume <id>`) in the session's folder, before you touch anything. A dim
   line says what it is doing.
-- **Only what was lost.** A session you ended yourself (`/exit`, Ctrl+C, `/logout`; pi's `/quit`) is
+- **Only what was lost.** A session you ended yourself (`/exit`, Ctrl+C, `/logout`; pi's `/quit`, omp's `/exit`) is
   forgotten on the spot. A session that was never sent a message is skipped, since it has
   nothing to resume. A shell you start inside a pane never resumes anything.
-- **Same flags.** `--dangerously-skip-permissions`, `--model`, `--permission-mode`,
-  `--add-dir` and similar flags come back with the session; for Droid
-  `--auto` (its interactive mode has no `--skip-permissions-unsafe`); for Cursor `--force`/`--yolo`, `--model`,
-  `--sandbox`, `--mode`. The first prompt, `--resume` itself and secrets (`--api-key`, `-H`)
-  are left behind.
+- **Same flags, within limits.** `--model`, `--permission-mode`, `--dangerously-skip-permissions`
+  and similar flags come back with the session, permission and sandbox modes included
+  (Codex's approval and sandbox flags; for Droid `--auto`; for Cursor `--force`/`--yolo`,
+  `--sandbox`; omp's `--auto-approve`, `--approval-mode`): the session comes back the way it
+  ran, and it waits for your input before it does anything. The first prompt, `--resume`
+  itself and secrets (`--api-key`, `-H`) are left behind. So is anything that makes the agent
+  load code, configuration or instructions it wouldn't load otherwise: settings, hooks,
+  extensions, plugins or MCP servers (`--settings`, `--mcp-config`, `--plugin-dir`,
+  `-e`/`--extension`, `--hook`, `--config`, `--approve-mcps`), extra instructions
+  (`--system-prompt`, `--append-system-prompt`, `--skill`) and extra folders (`--add-dir`,
+  omp's `--allow-home`, Cursor's `--workspace`). Folders the agent loads its settings or sessions from are never taken from the record either: for a session
+  started under another config folder (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+  `PI_CODING_AGENT_DIR`, …) Revive records only the variable's name. It resumes such a
+  session by itself only when the new shell sets that variable on its own (in your rc
+  file, say); a session started with pi's or omp's `--session-dir` never resumes by itself.
+  Instead the shell prints a dim line once. The dialog lists the session and shows the
+  command to run in a shell that has what it needs; it doesn't type it itself, and it
+  offers no fork for it. The
+  session's working folder is used by its real path, and only when it exists, is yours
+  and is not writable by everyone; otherwise the session is not resumed at all, not even
+  by hand, since the agent would start in another folder with its flags. The flags are kept in a terminal label, which any
+  program that can talk to herdr-core can change, and they run unattended after a reboot;
+  so they are filtered again when they are read back, not only when they are recorded.
 - **Fork.** Open the conversation of the focused agent as a new session beside it (right,
   below or in a new tab), with the same flags. Both work in the same folder; a fork copies
   the conversation, not the files. Claude Code, Codex and Droid (`droid --fork <id>`) fork;
@@ -67,12 +87,19 @@ hooks when the `droid` CLI is installed (`~/.factory/hooks.json` if you have one
 `cursor-agent` CLI is installed. A CLI counts as installed when it is on `PATH` or in
 `~/.local/bin` (cursor-agent also under `~/.local/share/cursor-agent`); a `~/.cursor` folder
 alone doesn't count, since the Cursor editor makes one and reads that `hooks.json` too.
-Droid's and Cursor's hooks run `revive.mjs hook --agent droid|cursor`. It links pi's extension
+Droid's and Cursor's hooks run `revive.mjs hook --agent droid|cursor`. Claude Code's hook
+names the engine as `"$HOME/…"` when it is under your home folder, so a `settings.json`
+synced between machines finds it on each. It links pi's extension
 (`mods/revive/pi/revive.ts`) as `~/.pi/agent/extensions/herdr-revive.ts` when pi is
-installed, and adds a short block to the file
-your login shell reads at start: `~/.zshrc` for zsh, and for bash the first of
-`~/.bash_profile`, `~/.bash_login` and `~/.profile` that exists (Herdr starts terminals as
-login shells, which don't read `~/.bashrc`). zsh is asked where its `.zshrc` is, so a
+installed, and omp's (`mods/revive/omp/revive.ts`) as
+`~/.omp/agent/extensions/herdr-revive.ts` when omp is, and adds a short block to the file
+your shell reads at start: `~/.zshrc` for zsh; for bash on macOS the first of
+`~/.bash_profile`, `~/.bash_login` and `~/.profile` that exists (herdr-core starts terminals
+there as login shells, which don't read `~/.bashrc`), and on Linux `~/.bashrc`, since
+herdr-core starts bash there without `-l` ([herdr-core#99](https://github.com/herdrdev/herdr-core/issues/99)).
+Only one bash file keeps the block: a block an earlier version put in another one (a
+Linux login file, say) is taken out.
+zsh is asked where its `.zshrc` is, so a
 `ZDOTDIR` set in `~/.zshenv` is followed. A symlinked file (a dotfiles repository) is
 changed where the link points, and every file keeps its permissions. The first time it
 changes a file, the original is copied to `<file>.revive-backup`; later runs keep that
@@ -80,9 +107,9 @@ copy. Running it again
 changes nothing, so it is also how you update the shell block after updating Revive. The
 **Install** button in the dialog does the same. Codex asks you to trust new hooks the next
 time it starts; Droid warns that its hooks changed and shows them in `/hooks`; pi loads the
-extension the next time it starts (or at `/reload`). An extension already at that path (a
+extension the next time it starts (or at `/reload`), omp the next time it starts. An extension already at that path (a
 copy your package manager placed, say) is left as it is, and `uninstall` takes out only the
-link `install` made. `--no-codex`, `--no-pi`, `--no-droid` and `--no-cursor` leave that
+link `install` made. `--no-codex`, `--no-pi`, `--no-omp`, `--no-droid` and `--no-cursor` leave that
 agent's files alone. If an agent's file isn't valid JSON, that agent is skipped with a note,
 the file is left as it is, and the rest is installed.
 
@@ -211,6 +238,18 @@ REVIVE_DEBUG=1 zsh               # say why a shell did or didn't resume
     the session file, and the transcript check looks only at that file.
   - A pi started before the extension was installed (or before `/reload`) is not
     recorded.
+- omp support is experimental, tested with omp 18.16.0 on Linux. It is recorded through
+  its own extension, only for an interactive omp in a herdr terminal (not `-p`,
+  `--mode json|rpc|rpc-ui`, `--no-session`, or its subagents):
+  - omp's `session_shutdown` carries no reason. The extension tells a reboot, core
+    restart or `kill` (SIGTERM, SIGHUP: kept) from `/exit`, Ctrl+C or Ctrl+D (forgotten).
+  - `/new`, `/resume` and `/fork` inside omp report `session_switch`; the new session is
+    recorded in place of the old one.
+  - omp renames its process `omp`; the extension sends its command line with the hook.
+  - The extension is linked into `~/.omp/agent/extensions`. omp also reads
+    `PI_CODING_AGENT_DIR`; Revive assumes that variable belongs to pi and links omp's
+    extension into omp's default folder. Named profiles (`--profile`) have their own
+    extension folder and are not installed into.
 - Droid (1.1.0) and the Cursor CLI (2026.10.22) were checked by hand: the hooks record the
   session and flags, and resume (and Droid's fork) reopen the conversation. Cursor
   sends `completed` for `/exit` and Ctrl+C twice (forgotten), `aborted` when it is killed

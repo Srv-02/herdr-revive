@@ -11,6 +11,15 @@ import { v_flex, h_flex } from "gpui-base";
 import { exec, run, theme, focused, appHome, home, props, closeOverlay, notify } from "herdr";
 import { AGENTS, canFork, command, shortId, ago, shJoin } from "./lib/core.js";
 
+/**
+ * Why a running session can't be forked from here, or null. A fork opens a new
+ * terminal with the app's environment and the recorded folder: a session that
+ * needs a variable or flag Revive doesn't carry, or whose folder failed the
+ * check, would start without it, or elsewhere.
+ */
+const unforkable = (rec) => (rec?.needs?.length ? `It ran with ${rec.needs.join(", ")}: fork it from its own shell.`
+  : rec?.cwdRefused ? "Its folder is missing, not yours, or writable by others." : null);
+
 const ENGINE = () => `${appHome()}/mods/revive/revive.mjs`;
 const REFRESH_MS = 4000;
 // The dialog grows with its content up to this share of the window; past it, the sessions scroll.
@@ -134,7 +143,7 @@ export default class Revive extends View {
   current() { return this.entries.find((e) => e.address === this.focus) ?? null; }
 
   fork(entry, place) {
-    if (entry?.forkable === false) return;
+    if (entry?.forkable === false || unforkable(entry?.rec)) return;
     const argv = command(entry?.rec, "fork");
     if (!argv) return;
     this.close();
@@ -205,7 +214,8 @@ export default class Revive extends View {
     const agent = AGENTS[rec.agent];
     const running = state === "running";
     const forks = canFork(rec.agent);
-    const empty = running && entry.forkable === false;
+    const blocked = running && forks ? unforkable(rec) : null;
+    const empty = running && (entry.forkable === false || Boolean(blocked));
     const flags = rec.flags?.length ? shJoin(rec.flags) : null;
     return v_flex().gap(12).p(14).rounded(12).bg(t.raised).border_1().border_color(t.border)
       .child(h_flex().gap(8).items_center()
@@ -220,7 +230,7 @@ export default class Revive extends View {
           ? "Started before Revive was installed: it can be forked, but won't come back by itself."
           : "Started before Revive was installed: it won't come back by itself.")))
         .when(running && !forks, (el) => el.child(div().text_color(t.dim).child(`${agent?.name ?? rec.agent} can't fork a session.`)))
-        .when(forks && empty, (el) => el.child(div().text_color(t.dim).child(NO_MESSAGE))))
+        .when(forks && empty, (el) => el.child(div().text_color(t.dim).child(blocked ?? NO_MESSAGE))))
       .child(h_flex().gap(6).flex_wrap()
         .when(running && forks, (el) => el
           .child(button(t, "fork-right", "Fork right", () => this.fork(entry, "right"), { hint: "F", disabled: empty }))
@@ -282,8 +292,8 @@ export default class Revive extends View {
       .child(div().text_color(on ? t.ansi2 : t.ansi1).child(on ? "✓" : "✕"))
       .child(name);
     return h_flex().gap(10).items_center().text_size(11)
-      // pi's hooks come from an extension, not a hooks file.
-      .children(agents.map((k) => part(k === "pi" ? "pi extension" : `${AGENTS[k].name} hooks`, s[k])))
+      // pi's and omp's hooks come from an extension, not a hooks file.
+      .children(agents.map((k) => part(k === "pi" || k === "omp" ? `${AGENTS[k].name} extension` : `${AGENTS[k].name} hooks`, s[k])))
       .child(part("shell", shellOk))
       .child(div().flex_1())
       .when(!ok, (el) => el.child(button(t, "install", this.busy ? "Installing…" : "Install", (_e, cx) => this.install(cx), { kind: "solid", disabled: this.busy })));

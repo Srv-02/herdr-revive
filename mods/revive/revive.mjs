@@ -3,7 +3,8 @@
 // the machine is rebooting, so the work happens where the session lives:
 //
 //   revive.mjs hook [--agent K]   an agent's SessionStart and SessionEnd (Claude Code, Codex,
-//                                 Droid, Cursor, and pi's through pi/revive.ts): remember the
+//                                 Droid, Cursor, pi's through pi/revive.ts and omp's through
+//                                 omp/revive.ts): remember the
 //                                 session on its terminal, or forget it
 //   revive.mjs check --shell PID  from the shell's rc file: print the commands that
 //                                 resume a session lost to a restart, or nothing
@@ -11,7 +12,7 @@
 //   revive.mjs list [--focus T]   every remembered session, as JSON, for the dialog
 //   revive.mjs resume T           resume T's session in T's shell
 //   revive.mjs auto T on|off      allow or stop automatic resume for T
-//   revive.mjs install [--zsh] [--bash] [--no-shell] [--no-codex] [--no-pi] [--no-droid] [--no-cursor]
+//   revive.mjs install [--zsh] [--bash] [--no-shell] [--no-codex] [--no-pi] [--no-omp] [--no-droid] [--no-cursor]
 //   revive.mjs uninstall
 //   revive.mjs doctor             what is installed, as JSON
 //
@@ -24,8 +25,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
-  AGENTS, agentKey, agentEnv, carriedFlags, hookOwner, hookPayload, endAction, isOneShot, readRecord, labelArgs, clearArgs, resumedArgs,
-  stateOf, shouldResume, resumeScript, resumeLine, shQuote, validId,
+  AGENTS, agentKey, carriedFlags, hookOwner, hookPayload, endAction, isOneShot, readRecord, labelArgs, clearArgs, resumedArgs,
+  stateOf, shouldResume, resumeScript, resumeLine, shQuote, shJoin, command, validId, needsOf, shortId,
 } from "./lib/core.js";
 import { agentDirs, findSession } from "./lib/sessions.js";
 
@@ -135,7 +136,7 @@ async function hook(args = []) {
     // The command line: the foreground's (exact words), else the agent
     // process the hook came from, when a wrapper with another name runs it.
     const fgArgv = terminal.foreground?.argv ?? terminal.argv ?? [];
-    // pi renames its process `pi`, which hides its flags: its extension sends its command line.
+    // pi and omp rename their process, which hides their flags: their extension sends the command line.
     const sent = payload.argv;
     const argv = sent && agentKey(null, sent) ? sent : agentKey(null, fgArgv) ? fgArgv : table.get(owner.agent)?.argv ?? fgArgv;
     // The command line first: the terminal's last OSC report may still be a
@@ -147,16 +148,18 @@ async function hook(args = []) {
     // place of the interactive one. Neither is worth bringing back.
     if (isOneShot(key, argv)) return;
     const same = rec?.session === session;
-    // The hook runs in the agent's environment: where it keeps its sessions.
-    const env = agentEnv(key, process.env);
+    // The hook runs in the agent's environment: whether it keeps its sessions
+    // somewhere else. Only the names are recorded (see `needs` in core.js).
+    const needs = needsOf(key, argv, process.env);
     await label(t, labelArgs({
       agent: key,
       session,
       cwd: payload.cwd || terminal.foreground?.cwd || terminal.cwd || "",
       flags: JSON.stringify(carriedFlags(key, argv)),
-      env: Object.keys(env).length ? JSON.stringify(env) : null,
-      // pi keeps sessions where its flags, environment or settings say: the file it named is the one to check.
-      transcript: key === "pi" && String(payload.transcript ?? "").startsWith("/") ? payload.transcript : null,
+      env: null,
+      needs: needs.length ? JSON.stringify(needs) : null,
+      // pi and omp keep sessions where their flags, environment or settings say: the file named is the one to check.
+      transcript: EXTENSION_AGENTS.includes(key) && String(payload.transcript ?? "").startsWith("/") ? payload.transcript : null,
       shell: terminal.pid ?? "",
       since: table.get(terminal.pid)?.since ?? null,
       at: same ? rec.at ?? Date.now() : Date.now(),
@@ -181,6 +184,26 @@ async function hook(args = []) {
   }
 }
 
+// ── records read back ───────────────────────────────────────────────────────
+
+/**
+ * A record read from labels, with its folder checked on disk: `cd` goes to
+ * the folder's real path, and only to an existing folder that belongs to this
+ * user and that others can't write to. Otherwise `cwdRefused` names the
+ * recorded folder, and neither an automatic resume nor one by hand runs.
+ */
+export function vetRecord(rec, { uid = process.getuid?.() } = {}) {
+  if (!rec?.cwd) return rec;
+  try {
+    const real = realpathSync(rec.cwd);
+    const st = statSync(real);
+    if (st.isDirectory() && (uid === undefined || st.uid === uid) && (st.mode & 0o002) === 0) return { ...rec, cwd: real };
+  } catch { /* gone */ }
+  return { ...rec, cwd: null, cwdRefused: rec.cwd };
+}
+
+const loadRecord = (labels) => vetRecord(readRecord(labels));
+
 // ── the shell ───────────────────────────────────────────────────────────────
 
 const claudeDir = (env = process.env) => env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
@@ -189,15 +212,15 @@ const claudeDir = (env = process.env) => env.CLAUDE_CONFIG_DIR || join(homedir()
  * Claude Code writes a session's transcript only once it has a message, so a
  * session opened and left empty can't be resumed: `--resume` says "No
  * conversation found". Its folder is named after the cwd; other folders are
- * searched when the agent moved. Codex is not checked. The folder is the
- * session's own `CLAUDE_CONFIG_DIR` when it was recorded with one, not this
- * shell's. Records from before Revive kept it fall back to this shell's.
- * pi does the same; its record names the file, which is all there is to check.
+ * searched when the agent moved. Codex is not checked. Only this process's
+ * `CLAUDE_CONFIG_DIR` is searched: a record with needs is never checked here
+ * (see `resume`). pi and omp do the same; their record names the file, which
+ * is all there is to check.
  */
 export function hasTranscript(rec) {
-  if (rec.agent === "pi") return !rec.transcript || existsSync(rec.transcript);
+  if (EXTENSION_AGENTS.includes(rec.agent)) return !rec.transcript || existsSync(rec.transcript);
   if (rec.agent !== "claude") return true;
-  const projects = join(rec.env?.CLAUDE_CONFIG_DIR ? rec.env.CLAUDE_CONFIG_DIR : claudeDir(), "projects");
+  const projects = join(claudeDir(), "projects");
   const file = `${rec.session}.jsonl`;
   if (rec.cwd && existsSync(join(projects, rec.cwd.replace(/[^A-Za-z0-9]/g, "-"), file))) return true;
   try { return readdirSync(projects).some((dir) => existsSync(join(projects, dir, file))); }
@@ -209,13 +232,20 @@ async function check(args) {
   if (!t) return;
   const shellPid = Number(args[args.indexOf("--shell") + 1]);
   const terminal = await getTerminal(t);
-  const rec = readRecord(terminal.labels);
+  const rec = loadRecord(terminal.labels);
   const debug = (why) => { if (process.env.REVIVE_DEBUG) process.stderr.write(`revive: ${why}\n`); };
   // A shell started inside the terminal is the common case and needs no ps.
   const pid = terminal.pid ?? null;
   const since = pid !== null && shellPid === pid ? await startOf(pid) : null;
   const verdict = shouldResume(rec, { pid, since, shellPid, env: process.env });
   debug(verdict.why);
+  if (!verdict.go && verdict.hint) {
+    // Said once: marked failed, the next shell stays quiet; the dialog offers it by hand.
+    await label(t, labelArgs({ failed: Date.now() }));
+    const note = `↻ Revive: not resuming ${AGENTS[rec.agent].name} session ${shortId(rec.session)}: ${verdict.why}. Resume it by hand (Revive dialog).`;
+    process.stdout.write(`printf '\\033[2m%s\\033[0m\\n' ${shQuote(note)}\n`);
+    return;
+  }
   if (!verdict.go) return;
   if (!hasTranscript(rec)) { debug("the session has no transcript; forgot it"); await label(t, clearArgs()); return; }
   // Mark it first: a second shell started from this one must not resume it again.
@@ -248,9 +278,9 @@ function claudeSessionFor(pid) {
  * and the fork is let through.
  */
 function forkable(rec, fgPid) {
-  if (rec.agent === "pi") return hasTranscript(rec);
+  if (EXTENSION_AGENTS.includes(rec.agent)) return hasTranscript(rec);
   if (rec.agent !== "claude") return true;
-  const known = rec.env?.CLAUDE_CONFIG_DIR || (fgPid && claudeSessionFor(fgPid) !== null);
+  const known = fgPid && claudeSessionFor(fgPid) !== null;
   if (!known) return null;
   return hasTranscript(rec);
 }
@@ -259,7 +289,7 @@ function forkable(rec, fgPid) {
 const startMs = (since) => { const ms = Date.parse(since ?? ""); return Number.isFinite(ms) ? ms : null; };
 
 function describe(t, since, focus, fgSince = null) {
-  const rec = readRecord(t.labels);
+  const rec = loadRecord(t.labels);
   const live = liveAgent(t);
   const entry = {
     address: t.address,
@@ -301,10 +331,26 @@ async function list(args) {
   process.stdout.write(JSON.stringify(out) + "\n");
 }
 
+/**
+ * What to run by hand for a record with needs: variables are set by the
+ * person; a flag goes right after the agent's name, with a placeholder for
+ * its value, which was never recorded.
+ */
+export function needsHint(rec) {
+  const argv = command(rec, "resume");
+  const vars = rec.needs.filter((n) => !n.startsWith("-"));
+  const flags = rec.needs.filter((n) => n.startsWith("-"));
+  const cd = rec.cwd ? `cd -- ${shQuote(rec.cwd)} && ` : "";
+  const added = flags.map((f) => ` ${f} <folder>`).join("");
+  const run = `${cd}${shJoin(argv.slice(0, 1))}${added}${argv.length > 1 ? ` ${shJoin(argv.slice(1))}` : ""}`;
+  const how = [vars.length ? `set ${vars.join(", ")}` : "", flags.length ? `fill in ${flags.join(", ")}` : ""].filter(Boolean).join(" and ");
+  return `${how[0].toUpperCase()}${how.slice(1)}, then run: ${run}`;
+}
+
 async function resume(args) {
   const t = args[0];
   const terminal = await getTerminal(t);
-  const rec = readRecord(terminal.labels);
+  const rec = loadRecord(terminal.labels);
   if (!rec) throw new Error(`${t} has no remembered session.`);
   if (liveAgent(terminal) === rec.agent) throw new Error(`${AGENTS[rec.agent].name} is already running in ${t}.`);
   const fg = terminal.foreground;
@@ -313,6 +359,13 @@ async function resume(args) {
   }
   const line = resumeLine(rec);
   if (!line) throw new Error(`Can't build a resume command for ${t}.`);
+  // Not sent without its folder: the agent would start elsewhere, with its flags.
+  if (rec.cwdRefused) throw new Error(`Won't resume: its folder ${tilde(rec.cwdRefused)} is missing, not yours, or writable by others.`);
+  // Not sent without what it needs, and not forgotten: its sessions are
+  // somewhere this shell may not look. The person runs it where that is set.
+  if (rec.needs.length) {
+    throw new Error(`Won't resume here: it ran with ${rec.needs.join(", ")}, which Revive doesn't carry. ${needsHint(rec)}`);
+  }
   if (!hasTranscript(rec)) {
     await label(t, clearArgs());
     throw new Error("That session never got a message, so there is nothing to resume. Forgot it.");
@@ -331,18 +384,41 @@ async function auto(args) {
 
 // ── install ─────────────────────────────────────────────────────────────────
 
+/**
+ * The engine as a hook runs it. Under the home folder it is written as
+ * `"$HOME/…"` (Claude Code runs hooks through a shell): a settings file kept in
+ * a dotfiles repository and copied to another machine, where home is another
+ * folder, still finds the engine there. Elsewhere it is the quoted path.
+ */
+export function engineWord(engine = ENGINE, home = homedir()) {
+  const rest = home && engine.startsWith(`${home}/`) ? engine.slice(home.length) : null;
+  return rest !== null && /^[A-Za-z0-9_@%+=:,./ -]+$/.test(rest) ? `"$HOME${rest}"` : shQuote(engine);
+}
 const HOOK_COMMAND = `node ${shQuote(ENGINE)} hook`;
-const hookCommand = (agent = null) => (agent ? `${HOOK_COMMAND} --agent ${agent}` : HOOK_COMMAND);
+const PORTABLE_HOOK_COMMAND = `node ${engineWord()} hook`;
+const hookCommand = (agent = null, portable = false) => {
+  const base = portable ? PORTABLE_HOOK_COMMAND : HOOK_COMMAND;
+  return agent ? `${base} --agent ${agent}` : base;
+};
 const claudeSettings = () => join(claudeDir(), "settings.json");
 const codexDir = () => process.env.CODEX_HOME || join(homedir(), ".codex");
 const codexHooks = () => join(codexDir(), "hooks.json");
 const piDir = () => process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-// pi has no hooks file: its hooks come from an extension, kept in the mod and
-// linked where pi loads extensions. It finds the engine from its own place.
-const PI_EXTENSION = join(dirname(ENGINE), "pi", "revive.ts");
-const piExtension = () => join(piDir(), "extensions", "herdr-revive.ts");
-// Its first line. A copy placed by something else (a Nix store path) counts too.
-const isPiExtension = (path) => readText(path).includes("herdr-revive: pi extension");
+// omp reads PI_CODING_AGENT_DIR too, but a pi setup sets it for pi: omp's own folder is assumed.
+const ompDir = () => join(homedir(), ".omp", "agent");
+/**
+ * pi and omp have no hooks file: their hooks come from an extension, kept in
+ * the mod and linked where each loads extensions. It finds the engine from its
+ * own place. `marker` is its first line; a copy placed by something else (a
+ * Nix store path) counts too.
+ */
+const EXTENSIONS = {
+  pi: { dir: piDir, flag: "--no-pi", source: join(dirname(ENGINE), "pi", "revive.ts"), marker: "herdr-revive: pi extension" },
+  omp: { dir: ompDir, flag: "--no-omp", source: join(dirname(ENGINE), "omp", "revive.ts"), marker: "herdr-revive: omp extension" },
+};
+const EXTENSION_AGENTS = Object.keys(EXTENSIONS);
+const extensionPath = (key) => join(EXTENSIONS[key].dir(), "extensions", "herdr-revive.ts");
+const isExtension = (key, path) => readText(path).includes(EXTENSIONS[key].marker);
 const factoryDir = () => agentDirs({ ...process.env, HOME: homedir() }).factory;
 const cursorDir = () => agentDirs({ ...process.env, HOME: homedir() }).cursor;
 
@@ -355,17 +431,22 @@ const hasCli = (bin) => [...(process.env.PATH ?? "").split(":").filter(Boolean),
   .some((dir) => existsSync(join(dir, bin)));
 
 /**
- * Herdr starts terminals as login shells (`zsh -l`, `bash -l`). zsh reads
- * .zshrc either way; a login bash reads the first of .bash_profile,
+ * On macOS herdr-core starts terminals as login shells (`zsh -l`, `bash -l`).
+ * zsh reads .zshrc either way; a login bash reads the first of .bash_profile,
  * .bash_login and .profile, and not .bashrc. Creating .bash_profile where
  * only .profile exists would stop bash from reading .profile, so the block
  * goes into whichever bash reads.
+ * On Linux herdr-core starts bash without `-l` (herdrdev/herdr-core#99): an
+ * interactive bash that is no login shell reads only .bashrc, so the block
+ * goes there. A login bash on Linux usually reaches it too: Debian's and
+ * Ubuntu's .profile source .bashrc.
  */
 const BASH_LOGIN = [".bash_profile", ".bash_login", ".profile"];
 const bashLogin = () => {
   const found = BASH_LOGIN.map((f) => join(homedir(), f)).find((p) => existsSync(p));
   return found ?? join(homedir(), ".bash_profile");
 };
+const bashRc = (platform = process.env.REVIVE_PLATFORM || process.platform) => (platform === "darwin" ? bashLogin() : join(homedir(), ".bashrc"));
 /**
  * zsh reads .zshrc from $ZDOTDIR, which people often set in ~/.zshenv. The
  * dialog's Install runs from the app, whose environment never read that
@@ -384,8 +465,8 @@ function zshDir() {
   zdotdir ||= homedir();
   return zdotdir;
 }
-const RC = { zsh: () => join(zshDir(), ".zshrc"), bash: bashLogin };
-// Every file a block may be in, for uninstall (.bashrc: from earlier versions).
+const RC = { zsh: () => join(zshDir(), ".zshrc"), bash: () => bashRc() };
+// Every file a block may be in, for uninstall.
 const ALL_RC = () => [RC.zsh(), ...BASH_LOGIN.map((f) => join(homedir(), f)), join(homedir(), ".bashrc")];
 const BEGIN = "# >>> herdr-revive >>>";
 const END = "# <<< herdr-revive <<<";
@@ -437,10 +518,10 @@ export function shellBlock(engine = ENGINE) {
  * the end each time would rewrite it for nothing. `timeouts` sets an event's
  * timeout (Codex clamps SessionEnd to 3 seconds and warns about more).
  */
-export function withHooks(settings, { remove = false, matcher = false, timeouts = {}, agent = null } = {}) {
+export function withHooks(settings, { remove = false, matcher = false, timeouts = {}, agent = null, portable = false } = {}) {
   const out = structuredClone(settings ?? {});
   out.hooks ??= {};
-  const command = hookCommand(agent);
+  const command = hookCommand(agent, portable);
   for (const event of EVENTS) {
     const timeout = timeouts[event] ?? 10;
     const ours = (out.hooks[event] ?? []).flatMap((g) => (g.hooks ?? []).filter(isOurs));
@@ -566,7 +647,7 @@ const CODEX_HOOKS = { matcher: true, timeouts: { SessionEnd: 3 } };
  */
 const HOOK_TARGETS = {
   // Like Codex: only when Claude Code is there, so a Codex-only setup gets no ~/.claude.
-  claude: { dir: claudeDir, present: () => existsSync(claudeDir()), files: () => [claudeSettings()], edit: (d, o) => withHooks(d, o), has: hasHooks },
+  claude: { dir: claudeDir, present: () => existsSync(claudeDir()), files: () => [claudeSettings()], edit: (d, o) => withHooks(d, { ...o, portable: true }), has: hasHooks },
   codex: {
     dir: codexDir,
     present: () => existsSync(codexDir()),
@@ -632,45 +713,58 @@ function install(args, remove = false) {
       notes.push(`Skipped ${AGENTS[key].name}: ${tilde(err.path)} is not valid JSON; fix it and run ${remove ? "uninstall" : "install"} again.`);
     }
   }
-  // A file of someone else's at pi's path: say so, and still install the rest.
-  let piWarning = null;
-  if (!args.includes("--no-pi") && existsSync(piDir())) {
+  // A file of someone else's at pi's or omp's path: say so, and still install the rest.
+  const warnings = [];
+  for (const key of EXTENSION_AGENTS) {
+    if (args.includes(EXTENSIONS[key].flag) || !existsSync(EXTENSIONS[key].dir())) continue;
     try {
-      if (linkPiExtension(remove)) {
-        changed.push(piExtension());
-        if (!remove) notes.push("pi loads the extension the next time it starts (or at /reload).");
+      if (linkExtension(key, remove)) {
+        changed.push(extensionPath(key));
+        // omp loads extensions only at start (its docs: modules are never re-evaluated).
+        if (!remove) notes.push(`${AGENTS[key].name} loads the extension the next time it starts${key === "pi" ? " (or at /reload)" : ""}.`);
       }
-    } catch (err) { piWarning = err.message; }
+    } catch (err) { warnings.push(err.message); }
   }
   if (!args.includes("--no-shell")) {
     for (const rc of remove ? ALL_RC() : shells(args).map((s) => RC[s]())) {
       if (remove && !existsSync(rc)) continue;
       if (save(rc, withShellBlock(readText(rc), { remove }))) changed.push(rc);
     }
+    // An earlier version put bash's block into another file (a login file,
+    // on Linux): only one bash file keeps it.
+    if (!remove && shells(args).includes("bash")) {
+      const keep = RC.bash();
+      for (const rc of [...BASH_LOGIN.map((f) => join(homedir(), f)), join(homedir(), ".bashrc")]) {
+        if (rc === keep || !existsSync(rc) || !readText(rc).includes(BEGIN)) continue;
+        if (save(rc, withShellBlock(readText(rc), { remove: true }))) changed.push(rc);
+      }
+    }
   }
   process.stdout.write(changed.length ? `${remove ? "Removed from" : "Updated"}:\n${changed.map((p) => `  ${p}`).join("\n")}\n` : "Nothing to change.\n");
   // On stdout, beside what did change: the dialog shows that output as its note.
   for (const line of notes) process.stdout.write(`${line}\n`);
-  if (piWarning) process.stderr.write(`${piWarning}\n`);
+  for (const line of warnings) process.stderr.write(`${line}\n`);
 }
 
 /**
- * Links pi's extension to the mod's, or, with remove, takes out that link.
- * An extension already there (this link, or a copy something else manages) is
- * left alone, and so is anything else by that name: it isn't Revive's to replace.
+ * Links pi's or omp's extension to the mod's, or, with remove, takes out that
+ * link. An extension already there (this link, or a copy something else
+ * manages) is left alone, and so is anything else by that name: it isn't
+ * Revive's to replace.
  */
-function linkPiExtension(remove) {
-  const target = piExtension();
+function linkExtension(key, remove) {
+  const target = extensionPath(key);
+  const source = EXTENSIONS[key].source;
   const real = (p) => { try { return realpathSync(p); } catch { return null; } };
   if (remove) {
-    if (!lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink() || real(target) !== real(PI_EXTENSION)) return false;
+    if (!lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink() || real(target) !== real(source)) return false;
     rmSync(target);
     return true;
   }
-  if (isPiExtension(target)) return false;
-  if (lstatSync(target, { throwIfNoEntry: false })) throw new Error(`${target} is not Revive's pi extension; Revive won't replace it.`);
+  if (isExtension(key, target)) return false;
+  if (lstatSync(target, { throwIfNoEntry: false })) throw new Error(`${target} is not Revive's ${AGENTS[key].name} extension; Revive won't replace it.`);
   mkdirSync(dirname(target), { recursive: true });
-  symlinkSync(PI_EXTENSION, target);
+  symlinkSync(source, target);
   return true;
 }
 
@@ -685,7 +779,7 @@ export function doctorReport() {
   return {
     engine: ENGINE,
     ...hooks,
-    pi: existsSync(piDir()) ? safe(() => isPiExtension(piExtension())) : null,
+    ...Object.fromEntries(EXTENSION_AGENTS.map((key) => [key, existsSync(EXTENSIONS[key].dir()) ? safe(() => isExtension(key, extensionPath(key))) : null])),
     shell: Object.fromEntries(Object.entries(RC).map(([s, rc]) => [s, readText(rc()).includes(BEGIN)])),
   };
 }
