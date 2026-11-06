@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, realpathSync, symlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { parseProcesses, hasTranscript } from "../mods/revive/revive.mjs";
+import { parseProcesses, hasTranscript, needsHint } from "../mods/revive/revive.mjs";
 import { hookOwner } from "../mods/revive/lib/core.js";
 
 const ENGINE = resolve("mods/revive/revive.mjs");
@@ -345,10 +345,16 @@ test("Resume by hand refuses a session with needs, keeps it and shows the comman
     const { resume, sent, labelled } = resumeSetup(extra);
     const err = resume();
     assert.match(err, /Won't resume here: it ran with (CODEX_HOME|--session-dir)/);
-    assert.match(err, new RegExp(`(codex resume|pi --session) ${ID}`), "a command to copy");
+    assert.match(err, new RegExp(`Set CODEX_HOME, then run: cd -- \\S+ && codex resume ${ID}|Fill in --session-dir, then run: cd -- \\S+ && pi --session-dir <folder> --session ${ID}`), "a command to copy");
     assert.equal(sent(), null);
     assert.doesNotMatch(labelled(), /revive\.session=(\s|$)/, "the record is not forgotten");
   }
+});
+
+test("the hand-resume hint puts an uncarried flag after the agent's name, with a placeholder", () => {
+  const rec = { agent: "pi", session: ID, cwd: "/w x", flags: ["--model", "m"], needs: ["PI_CODING_AGENT_DIR", "--session-dir"] };
+  assert.equal(needsHint(rec), `Set PI_CODING_AGENT_DIR and fill in --session-dir, then run: cd -- '/w x' && pi --session-dir <folder> --model m --session ${ID}`);
+  assert.equal(needsHint({ agent: "claude", session: ID, cwd: null, flags: [], needs: ["CLAUDE_CONFIG_DIR"] }), `Set CLAUDE_CONFIG_DIR, then run: claude --resume ${ID}`);
 });
 
 // ── Factory Droid and Cursor ────────────────────────────────────────────────

@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   AGENTS, agentKey, carriedFlags, hookOwner, hookPayload, endAction, isOneShot, readRecord, labelArgs, clearArgs, resumedArgs,
-  stateOf, shouldResume, resumeScript, resumeLine, shQuote, validId, needsOf, shortId,
+  stateOf, shouldResume, resumeScript, resumeLine, shQuote, shJoin, command, validId, needsOf, shortId,
 } from "./lib/core.js";
 import { agentDirs, findSession } from "./lib/sessions.js";
 
@@ -331,6 +331,22 @@ async function list(args) {
   process.stdout.write(JSON.stringify(out) + "\n");
 }
 
+/**
+ * What to run by hand for a record with needs: variables are set by the
+ * person; a flag goes right after the agent's name, with a placeholder for
+ * its value, which was never recorded.
+ */
+export function needsHint(rec) {
+  const argv = command(rec, "resume");
+  const vars = rec.needs.filter((n) => !n.startsWith("-"));
+  const flags = rec.needs.filter((n) => n.startsWith("-"));
+  const cd = rec.cwd ? `cd -- ${shQuote(rec.cwd)} && ` : "";
+  const added = flags.map((f) => ` ${f} <folder>`).join("");
+  const run = `${cd}${shJoin(argv.slice(0, 1))}${added}${argv.length > 1 ? ` ${shJoin(argv.slice(1))}` : ""}`;
+  const how = [vars.length ? `set ${vars.join(", ")}` : "", flags.length ? `fill in ${flags.join(", ")}` : ""].filter(Boolean).join(" and ");
+  return `${how[0].toUpperCase()}${how.slice(1)}, then run: ${run}`;
+}
+
 async function resume(args) {
   const t = args[0];
   const terminal = await getTerminal(t);
@@ -348,7 +364,7 @@ async function resume(args) {
   // Not sent without what it needs, and not forgotten: its sessions are
   // somewhere this shell may not look. The person runs it where that is set.
   if (rec.needs.length) {
-    throw new Error(`Won't resume here: it ran with ${rec.needs.join(", ")}, which Revive doesn't carry. Set it and run: ${line}`);
+    throw new Error(`Won't resume here: it ran with ${rec.needs.join(", ")}, which Revive doesn't carry. ${needsHint(rec)}`);
   }
   if (!hasTranscript(rec)) {
     await label(t, clearArgs());
