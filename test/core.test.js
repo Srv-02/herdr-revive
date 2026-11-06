@@ -65,8 +65,8 @@ test("flags that load code, configuration, instructions or folders are never car
     claude: [["--settings", "/s.json"], ["--settings={\"hooks\":{}}"], ["--mcp-config", "/m.json"], ["--plugin-dir", "/p"], ["--add-dir", "/"], ["--add-dir=/"],
       ["--append-system-prompt", "x"], ["--system-prompt", "x"]],
     codex: [["-c", "x=y"], ["--config", "x=y"], ["--dangerously-bypass-hook-trust"], ["--profile", "../x"]],
-    pi: [["-e", "/x.ts"], ["--extension", "/x.ts"], ["--skill", "/s"], ["--system-prompt", "x"], ["--append-system-prompt", "x"]],
-    omp: [["-e", "/x.ts"], ["--extension", "/x.ts"], ["--hook", "/h.ts"], ["--config", "/c.yml"], ["--add-dir", "/"], ["--allow-home"],
+    pi: [["-e", "/x.ts"], ["--extension", "/x.ts"], ["--skill", "/s"], ["--system-prompt", "x"], ["--append-system-prompt", "x"], ["--session-dir", "/s"]],
+    omp: [["-e", "/x.ts"], ["--extension", "/x.ts"], ["--hook", "/h.ts"], ["--config", "/c.yml"], ["--add-dir", "/"], ["--allow-home"], ["--session-dir", "/s"],
       ["--system-prompt", "x"], ["--system-prompt-template", "x"], ["--append-system-prompt", "x"], ["--api-key", "k"], ["--profile", "../../x"]],
     droid: [["--settings", "/s.json"], ["--append-system-prompt", "x"], ["--append-system-prompt-file", "/p"]],
     cursor: [["--approve-mcps"], ["--plugin-dir", "/p"], ["--api-key", "k"]],
@@ -114,7 +114,8 @@ test("resume and fork commands per agent", () => {
   assert.deepEqual(command({ agent: "codex", session: ID, flags: [] }, "fork"), ["codex", "fork", ID]);
   assert.deepEqual(command({ agent: "pi", session: ID, flags: ["--model", "sonnet"] }, "resume"), ["pi", "--model", "sonnet", "--session", ID]);
   assert.deepEqual(command({ agent: "pi", session: ID, flags: [] }, "fork"), ["pi", "--fork", ID]);
-  assert.deepEqual(command({ agent: "pi", session: ID, env: { PI_CODING_AGENT_DIR: "/p" } }), ["env", "PI_CODING_AGENT_DIR=/p", "pi", "--session", ID]);
+  // A config folder is never set from a record: the resuming shell's own counts.
+  assert.deepEqual(command({ agent: "pi", session: ID, env: { PI_CODING_AGENT_DIR: "/p" } }), ["pi", "--session", ID]);
   assert.equal(command({ agent: "claude", session: "x y" }), null);
   assert.equal(command({ agent: "vim", session: ID }), null);
   assert.equal(command(null), null);
@@ -130,7 +131,7 @@ test("shell quoting survives the shell", () => {
 test("labels read back as a record", () => {
   // `ended` from older versions is read past.
   const rec = readRecord(labels({ agent: "claude", session: ID, cwd: "/w", flags: '["--model","opus"]', shell: 41, at: 5, ended: "other" }));
-  assert.deepEqual(rec, { agent: "claude", session: ID, cwd: "/w", flags: ["--model", "opus"], env: {}, transcript: null, shell: 41, since: null, at: 5, resumed: null, failed: null, auto: true });
+  assert.deepEqual(rec, { agent: "claude", session: ID, cwd: "/w", flags: ["--model", "opus"], env: {}, needs: [], transcript: null, shell: 41, since: null, at: 5, resumed: null, failed: null, auto: true });
   assert.equal(readRecord({}), null);
   assert.equal(readRecord(undefined), null);
   assert.deepEqual(readRecord(labels({ session: ID, flags: "{broken" })).flags, []);
@@ -200,12 +201,15 @@ test("a session keeps its agent's config folder, and only that", () => {
   assert.deepEqual(agentEnv("claude", { CLAUDE_CONFIG_DIR: "/h/.claude-work", CODEX_HOME: "/c", PATH: "/bin" }), { CLAUDE_CONFIG_DIR: "/h/.claude-work" });
   assert.deepEqual(agentEnv("codex", { CODEX_HOME: "/c" }), { CODEX_HOME: "/c" });
   assert.deepEqual(agentEnv("claude", { CLAUDE_CONFIG_DIR: "" }), {});
+  // Older records held values: neither they nor a variable the agent doesn't declare are used.
   const rec = readRecord(labels({ agent: "claude", session: ID, env: JSON.stringify({ CLAUDE_CONFIG_DIR: "/h/my work", LD_PRELOAD: "/evil.so" }) }));
-  assert.deepEqual(rec.env, { CLAUDE_CONFIG_DIR: "/h/my work" }, "a variable the agent doesn't declare is dropped");
-  assert.deepEqual(command(rec), ["env", "CLAUDE_CONFIG_DIR=/h/my work", "claude", "--resume", ID]);
-  assert.deepEqual(command(rec, "fork"), ["env", "CLAUDE_CONFIG_DIR=/h/my work", "claude", "--resume", ID, "--fork-session"]);
-  assert.match(resumeScript({ ...rec, cwd: "/w" }, "/e"), /env 'CLAUDE_CONFIG_DIR=\/h\/my work' claude --resume/);
-  assert.deepEqual(readRecord(labels({ agent: "claude", session: ID, env: "{broken" })).env, {});
+  assert.deepEqual(rec.env, {});
+  assert.deepEqual(rec.needs, ["CLAUDE_CONFIG_DIR"]);
+  assert.deepEqual(command(rec), ["claude", "--resume", ID]);
+  assert.deepEqual(command(rec, "fork"), ["claude", "--resume", ID, "--fork-session"]);
+  assert.doesNotMatch(resumeScript({ ...rec, cwd: "/w" }, "/e"), /CLAUDE_CONFIG_DIR/);
+  assert.deepEqual(readRecord(labels({ agent: "claude", session: ID, env: "{broken" })).needs, []);
+  assert.deepEqual(readRecord(labels({ agent: "claude", session: ID, needs: '["CLAUDE_CONFIG_DIR","LD_PRELOAD","--settings"]' })).needs, ["CLAUDE_CONFIG_DIR"]);
   assert.deepEqual(command(readRecord(labels({ agent: "claude", session: ID }))), ["claude", "--resume", ID], "no variables, no env");
 });
 

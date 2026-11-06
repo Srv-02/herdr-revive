@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   AGENTS, agentKey, agentEnv, carriedFlags, hookOwner, hookPayload, endAction, isOneShot, readRecord, labelArgs, clearArgs, resumedArgs,
-  stateOf, shouldResume, resumeScript, resumeLine, shQuote, validId,
+  stateOf, shouldResume, resumeScript, resumeLine, shQuote, validId, needsOf, shortId,
 } from "./lib/core.js";
 import { agentDirs, findSession } from "./lib/sessions.js";
 
@@ -148,14 +148,16 @@ async function hook(args = []) {
     // place of the interactive one. Neither is worth bringing back.
     if (isOneShot(key, argv)) return;
     const same = rec?.session === session;
-    // The hook runs in the agent's environment: where it keeps its sessions.
-    const env = agentEnv(key, process.env);
+    // The hook runs in the agent's environment: whether it keeps its sessions
+    // somewhere else. Only the names are recorded (see `needs` in core.js).
+    const needs = needsOf(key, argv, process.env);
     await label(t, labelArgs({
       agent: key,
       session,
       cwd: payload.cwd || terminal.foreground?.cwd || terminal.cwd || "",
       flags: JSON.stringify(carriedFlags(key, argv)),
-      env: Object.keys(env).length ? JSON.stringify(env) : null,
+      env: null,
+      needs: needs.length ? JSON.stringify(needs) : null,
       // pi and omp keep sessions where their flags, environment or settings say: the file named is the one to check.
       transcript: EXTENSION_AGENTS.includes(key) && String(payload.transcript ?? "").startsWith("/") ? payload.transcript : null,
       shell: terminal.pid ?? "",
@@ -182,6 +184,26 @@ async function hook(args = []) {
   }
 }
 
+// ── records read back ───────────────────────────────────────────────────────
+
+/**
+ * A record read from labels, with its folder checked on disk: `cd` goes to
+ * the folder's real path, and only to an existing folder that belongs to this
+ * user and that others can't write to. Otherwise `cwdRefused` stops an
+ * automatic resume (the dialog still offers it by hand).
+ */
+export function vetRecord(rec, { uid = process.getuid?.() } = {}) {
+  if (!rec?.cwd) return rec;
+  try {
+    const real = realpathSync(rec.cwd);
+    const st = statSync(real);
+    if (st.isDirectory() && (uid === undefined || st.uid === uid) && (st.mode & 0o002) === 0) return { ...rec, cwd: real };
+  } catch { /* gone */ }
+  return { ...rec, cwd: null, cwdRefused: true };
+}
+
+const loadRecord = (labels) => vetRecord(readRecord(labels));
+
 // ── the shell ───────────────────────────────────────────────────────────────
 
 const claudeDir = (env = process.env) => env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
@@ -198,7 +220,7 @@ const claudeDir = (env = process.env) => env.CLAUDE_CONFIG_DIR || join(homedir()
 export function hasTranscript(rec) {
   if (EXTENSION_AGENTS.includes(rec.agent)) return !rec.transcript || existsSync(rec.transcript);
   if (rec.agent !== "claude") return true;
-  const projects = join(rec.env?.CLAUDE_CONFIG_DIR ? rec.env.CLAUDE_CONFIG_DIR : claudeDir(), "projects");
+  const projects = join(claudeDir(), "projects");
   const file = `${rec.session}.jsonl`;
   if (rec.cwd && existsSync(join(projects, rec.cwd.replace(/[^A-Za-z0-9]/g, "-"), file))) return true;
   try { return readdirSync(projects).some((dir) => existsSync(join(projects, dir, file))); }
@@ -210,13 +232,20 @@ async function check(args) {
   if (!t) return;
   const shellPid = Number(args[args.indexOf("--shell") + 1]);
   const terminal = await getTerminal(t);
-  const rec = readRecord(terminal.labels);
+  const rec = loadRecord(terminal.labels);
   const debug = (why) => { if (process.env.REVIVE_DEBUG) process.stderr.write(`revive: ${why}\n`); };
   // A shell started inside the terminal is the common case and needs no ps.
   const pid = terminal.pid ?? null;
   const since = pid !== null && shellPid === pid ? await startOf(pid) : null;
   const verdict = shouldResume(rec, { pid, since, shellPid, env: process.env });
   debug(verdict.why);
+  if (!verdict.go && verdict.hint) {
+    // Said once: marked failed, the next shell stays quiet; the dialog offers it by hand.
+    await label(t, labelArgs({ failed: Date.now() }));
+    const note = `↻ Revive: not resuming ${AGENTS[rec.agent].name} session ${shortId(rec.session)}: ${verdict.why}. Resume it by hand (Revive dialog).`;
+    process.stdout.write(`printf '\\033[2m%s\\033[0m\\n' ${shQuote(note)}\n`);
+    return;
+  }
   if (!verdict.go) return;
   if (!hasTranscript(rec)) { debug("the session has no transcript; forgot it"); await label(t, clearArgs()); return; }
   // Mark it first: a second shell started from this one must not resume it again.
@@ -251,7 +280,7 @@ function claudeSessionFor(pid) {
 function forkable(rec, fgPid) {
   if (EXTENSION_AGENTS.includes(rec.agent)) return hasTranscript(rec);
   if (rec.agent !== "claude") return true;
-  const known = rec.env?.CLAUDE_CONFIG_DIR || (fgPid && claudeSessionFor(fgPid) !== null);
+  const known = fgPid && claudeSessionFor(fgPid) !== null;
   if (!known) return null;
   return hasTranscript(rec);
 }
@@ -260,7 +289,7 @@ function forkable(rec, fgPid) {
 const startMs = (since) => { const ms = Date.parse(since ?? ""); return Number.isFinite(ms) ? ms : null; };
 
 function describe(t, since, focus, fgSince = null) {
-  const rec = readRecord(t.labels);
+  const rec = loadRecord(t.labels);
   const live = liveAgent(t);
   const entry = {
     address: t.address,
@@ -305,7 +334,7 @@ async function list(args) {
 async function resume(args) {
   const t = args[0];
   const terminal = await getTerminal(t);
-  const rec = readRecord(terminal.labels);
+  const rec = loadRecord(terminal.labels);
   if (!rec) throw new Error(`${t} has no remembered session.`);
   if (liveAgent(terminal) === rec.agent) throw new Error(`${AGENTS[rec.agent].name} is already running in ${t}.`);
   const fg = terminal.foreground;

@@ -40,7 +40,14 @@ with omp 18.16).
   extensions, plugins or MCP servers (`--settings`, `--mcp-config`, `--plugin-dir`,
   `-e`/`--extension`, `--hook`, `--config`, `--approve-mcps`), extra instructions
   (`--system-prompt`, `--append-system-prompt`, `--skill`) and extra folders (`--add-dir`,
-  omp's `--allow-home`). The flags are kept in a terminal label, which any
+  omp's `--allow-home`). Folders the agent loads its settings or sessions from are never taken from the record either: for a session
+  started under another config folder (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+  `PI_CODING_AGENT_DIR`, …) Revive records only the variable's name. It resumes such a
+  session by itself only when the new shell sets that variable on its own (in your rc
+  file, say); a session started with pi's or omp's `--session-dir` never resumes by itself.
+  Instead the shell prints a dim line once and the dialog offers the session by hand. The
+  session's working folder is used by its real path, and only when it exists, is yours
+  and is not writable by everyone. The flags are kept in a terminal label, which any
   program that can talk to herdr-core can change, and they run unattended after a reboot;
   so they are filtered again when they are read back, not only when they are recorded.
 - **Fork.** Open the conversation of the focused agent as a new session beside it (right,

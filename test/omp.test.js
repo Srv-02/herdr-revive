@@ -3,11 +3,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, existsSync, chmodSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { agentKey, carriedFlags, command, hookPayload, isOneShot, readRecord, canFork } from "../mods/revive/lib/core.js";
+import { agentKey, carriedFlags, command, hookPayload, isOneShot, readRecord, canFork, needsOf, shouldResume } from "../mods/revive/lib/core.js";
+import { vetRecord } from "../mods/revive/revive.mjs";
 
 const ID = "0190f3a2-7c41-7b5e-9d2a-3e6f1c8b4a17";
 const FILE = `/h/.omp/agent/sessions/-w/2026-01-01T00-00-00-000Z_${ID}.jsonl`;
@@ -57,7 +58,7 @@ test("omp is known by its command line and its report, and only as the first wor
 test("omp resumes with --resume and forks with --fork, keeping its flags", () => {
   assert.deepEqual(command({ agent: "omp", session: ID, flags: ["--model", "opus"] }), ["omp", "--model", "opus", "--resume", ID]);
   assert.deepEqual(command({ agent: "omp", session: ID, flags: [] }, "fork"), ["omp", "--fork", ID]);
-  assert.deepEqual(command({ agent: "omp", session: ID, env: { PI_CODING_AGENT_DIR: "/p" } }), ["env", "PI_CODING_AGENT_DIR=/p", "omp", "--resume", ID]);
+  assert.deepEqual(command({ agent: "omp", session: ID, env: { PI_CODING_AGENT_DIR: "/p" } }), ["omp", "--resume", ID]);
   assert.equal(canFork("omp"), true);
   assert.deepEqual(
     carriedFlags("omp", ["omp", "--model=opus", "--thinking", "high", "--profile", "work", "--approval-mode", "write", "--resume", "x", "-e", "/x.ts", "fix it"]),
@@ -130,4 +131,38 @@ test("omp outside a herdr terminal, in print or rpc mode, or without a session f
   omp.handlers.session_switch({ reason: "new" }, ctx("json"));
   await omp.handlers.session_shutdown({}, ctx("tui", null));
   assert.deepEqual(omp.log(), []);
+});
+
+test("--allow-home and --session-dir are never carried; --session-dir is a need", () => {
+  assert.deepEqual(carriedFlags("omp", ["omp", "--allow-home", "--session-dir", "/s", "--model", "m"]), ["--model", "m"]);
+  assert.deepEqual(needsOf("omp", ["omp", "--session-dir=/s", "--model", "m"], { PI_CODING_AGENT_DIR: "/x", HOME: "/h" }), ["PI_CODING_AGENT_DIR", "--session-dir"]);
+  assert.deepEqual(needsOf("omp", ["omp", "--model", "m"], {}), []);
+  const rec = readRecord({ "revive.agent": "omp", "revive.session": ID, "revive.needs": '["--session-dir"]', "revive.shell": "1" });
+  // A --session-dir is never met by the shell: no automatic resume, a hint instead.
+  const v = shouldResume(rec, { pid: 2, shellPid: 2, env: {} });
+  assert.deepEqual([v.go, v.hint], [false, true]);
+  assert.match(v.why, /--session-dir/);
+});
+
+test("a config variable need is met only by the shell's own setting", () => {
+  const rec = readRecord({ "revive.agent": "claude", "revive.session": ID, "revive.needs": '["CLAUDE_CONFIG_DIR"]', "revive.shell": "1" });
+  assert.equal(shouldResume(rec, { pid: 2, shellPid: 2, env: {} }).go, false);
+  assert.equal(shouldResume(rec, { pid: 2, shellPid: 2, env: { CLAUDE_CONFIG_DIR: "/h/.claude-work" } }).go, true);
+  assert.equal(shouldResume(rec, { pid: 1, shellPid: 1, env: {} }).go, false, "same shell: quiet");
+  assert.equal(shouldResume(rec, { pid: 1, shellPid: 1, env: {} }).hint, undefined);
+});
+
+test("the folder a record names is used only as the person's own, real folder", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "revive-cwd-")));
+  const work = join(root, "work");
+  mkdirSync(work);
+  symlinkSync(work, join(root, "link"));
+  const rec = { agent: "omp", session: ID, cwd: join(root, "link") };
+  assert.equal(vetRecord(rec).cwd, work, "links resolved: the checked folder is the one used");
+  assert.equal(vetRecord({ ...rec, cwd: join(root, "gone") }).cwdRefused, true);
+  assert.equal(vetRecord(rec, { uid: 999999 }).cwdRefused, true, "another user's folder");
+  chmodSync(work, 0o777);
+  assert.equal(vetRecord(rec).cwdRefused, true, "anyone may write there");
+  chmodSync(work, 0o755);
+  assert.equal(shouldResume({ ...readRecord({ "revive.agent": "omp", "revive.session": ID, "revive.shell": "1" }), cwdRefused: true }, { pid: 2, shellPid: 2 }).go, false);
 });

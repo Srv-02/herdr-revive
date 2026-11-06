@@ -9,7 +9,7 @@
 
 export const PREFIX = "revive.";
 // `ended` is no longer written; it stays here so clearing removes it from older records.
-export const KEYS = ["agent", "session", "cwd", "flags", "env", "transcript", "shell", "since", "at", "ended", "resumed", "failed", "auto"];
+export const KEYS = ["agent", "session", "cwd", "flags", "env", "needs", "transcript", "shell", "since", "at", "ended", "resumed", "failed", "auto"];
 
 /**
  * How an agent's SessionEnd reason is taken: "ignore" (the same process starts
@@ -19,6 +19,7 @@ export const KEYS = ["agent", "session", "cwd", "flags", "env", "transcript", "s
  */
 /** A value flag that names one of the person's own profiles, not a path. */
 const NAME = { arg: 1, ok: (v) => /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(v) };
+
 
 const claudeEnd = (reason) => (reason === "clear" || reason === "resume" ? "ignore" : reason === "other" ? "keep" : "forget");
 
@@ -59,6 +60,13 @@ const claudeEnd = (reason) => (reason === "clear" || reason === "resume" ? "igno
  *   `--dangerously-bypass-hook-trust`), extra instructions
  *   (`--system-prompt`, `--append-system-prompt`, `--skill`) and extra
  *   folders (`--add-dir`, omp's `--allow-home`).
+ * The agent's `env` variables and `--session-dir` name the folder it loads its
+ * settings, hooks, extensions or sessions from. Their values are never taken
+ * from a label: a label could name any folder, and a check of that folder
+ * proves nothing, since whoever writes labels can also put a matching file
+ * there. Only their names are recorded (`needs`): such a session resumes by
+ * itself only when the resuming shell sets the variable on its own, and never
+ * when it ran with `--session-dir`. The dialog still offers it by hand.
  * A session started with one of these comes back without it; the person adds
  * it again if they want it.
  * The engine (revive.mjs) has the other half: where each agent's hooks are
@@ -66,7 +74,8 @@ const claudeEnd = (reason) => (reason === "clear" || reason === "resume" ? "igno
  *
  * `env` lists the variables that say where the agent keeps its sessions: a
  * session started under `CLAUDE_CONFIG_DIR=~/.claude-work` is found, and
- * resumed, only under that same folder, so the hook records them with it.
+ * resumed, only under that same folder. The hook records their names, not
+ * their values (see `needs` below). `findIn` lists flags of the same kind.
  * `oneShot` tells a run that answers and quits (`claude -p`, `codex exec`)
  * from an interactive session, given the words after the program's name:
  * such a run has hooks too, and must not replace the session on record.
@@ -126,6 +135,7 @@ export const AGENTS = {
     resume: (id, flags) => ["pi", ...flags, "--session", id],
     fork: (id, flags) => ["pi", ...flags, "--fork", id],
     env: ["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"],
+    findIn: ["--session-dir"],
     oneShot: (args) => args.some((w, i) => w === "-p" || w === "--print" || w === "--no-session"
       || /^--mode=(json|rpc)$/.test(w) || (w === "--mode" && /^(json|rpc)$/.test(args[i + 1] ?? ""))),
     carry: {
@@ -148,7 +158,6 @@ export const AGENTS = {
       "--no-skills": 0,
       "-nc": 0,
       "--no-context-files": 0,
-      "--session-dir": 1,
       "-a": 0,
       "--approve": 0,
       "-na": 0,
@@ -170,6 +179,7 @@ export const AGENTS = {
     resume: (id, flags) => ["omp", ...flags, "--resume", id],
     fork: (id, flags) => ["omp", ...flags, "--fork", id],
     env: ["PI_CODING_AGENT_DIR"],
+    findIn: ["--session-dir"],
     oneShot: (args) => args.some((w, i) => w === "-p" || w === "--print" || w === "--no-session" || w.startsWith("--export")
       || /^--mode=(json|rpc|rpc-ui)$/.test(w) || (w === "--mode" && /^(json|rpc|rpc-ui)$/.test(args[i + 1] ?? ""))),
     carry: {
@@ -192,7 +202,6 @@ export const AGENTS = {
       "--no-context-files": 0,
       "--no-title": 0,
       "--hide-thinking": 0,
-      "--session-dir": 1,
       "--profile": NAME,
       "--approval-mode": 1,
       "--auto-approve": 0,
@@ -415,16 +424,20 @@ export const validId = (id) => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9
 export const shortId = (id) => (id ? String(id).slice(0, 8) : "");
 
 /**
- * The command line that resumes or forks a session. A session recorded with
- * its agent's variables (`CLAUDE_CONFIG_DIR`) gets them back through `env`.
+ * The command line that resumes or forks a session.
  */
 export function command(rec, kind = "resume") {
   const agent = AGENTS[rec?.agent];
   if (!agent || typeof agent[kind] !== "function" || !validId(rec.session)) return null;
-  const argv = agent[kind](rec.session, safeFlags(rec.agent, rec.flags ?? []));
-  const vars = Object.entries(agentEnv(rec.agent, rec.env ?? {}));
-  return vars.length ? ["env", ...vars.map(([k, v]) => `${k}=${v}`), ...argv] : argv;
+  // No variables: a resume runs with the shell's own (see `needs`).
+  return agent[kind](rec.session, safeFlags(rec.agent, rec.flags ?? []));
 }
+
+/**
+ * The needs the shell doesn't meet: a variable it doesn't set, a `findIn`
+ * flag always. The session then isn't resumed by itself.
+ */
+export const unmet = (rec, env = {}) => (rec?.needs ?? []).filter((n) => n.startsWith("-") || typeof env[n] !== "string" || env[n] === "");
 
 /** One word for a POSIX shell, quoted only when it needs to be. */
 export function shQuote(word) {
@@ -436,6 +449,18 @@ export const shJoin = (argv) => argv.map(shQuote).join(" ");
 
 const num = (v) => (v === undefined || v === "" || v === null ? null : Number.isFinite(Number(v)) ? Number(v) : null);
 
+/**
+ * What a session needs that Revive won't carry: the agent's `env` variables
+ * set in `env`, and its `findIn` flags on the command line `argv`.
+ */
+export function needsOf(key, argv = [], env = {}) {
+  const agent = AGENTS[key];
+  if (!agent) return [];
+  const words = argv.slice(argsStart(key, argv)).map(String);
+  const flags = (agent.findIn ?? []).filter((f) => words.some((w) => w === f || w.startsWith(`${f}=`)));
+  return [...Object.keys(agentEnv(key, env)), ...flags];
+}
+
 /** A terminal's labels as a record, or null when it carries no session. */
 export function readRecord(labels) {
   const get = (k) => labels?.[PREFIX + k];
@@ -446,18 +471,25 @@ export function readRecord(labels) {
     // Only the flags the agent's carry list lets through, as on the way in.
     flags = safeFlags(get("agent"), JSON.parse(get("flags") || "[]"));
   } catch { /* a hand-edited label: carry nothing */ }
-  let env = {};
-  try {
-    const parsed = JSON.parse(get("env") || "{}");
-    // Only the variables the agent declares: a label must not set LD_PRELOAD.
-    if (parsed && typeof parsed === "object") env = agentEnv(get("agent"), parsed);
-  } catch { /* a hand-edited label: no variables */ }
+  // Names only, and only those the agent declares. `env`, from earlier
+  // versions, held values too: they are not used, its names count as needs.
+  const agent = AGENTS[get("agent")];
+  const known = new Set([...(agent?.env ?? []), ...(agent?.findIn ?? [])]);
+  const needs = new Set();
+  for (const key of ["needs", "env"]) {
+    try {
+      const parsed = JSON.parse(get(key) || "[]");
+      const names = Array.isArray(parsed) ? parsed : parsed && typeof parsed === "object" ? Object.keys(parsed) : [];
+      for (const n of names) if (known.has(n)) needs.add(n);
+    } catch { /* a hand-edited label: nothing */ }
+  }
   return {
     agent: get("agent") || null,
     session,
     cwd: get("cwd") || null,
     flags,
-    env,
+    env: {},
+    needs: [...needs],
     transcript: get("transcript") || null,
     shell: num(get("shell")),
     since: get("since") || null,
@@ -528,6 +560,10 @@ export function shouldResume(rec, { pid, since = null, shellPid, env = {} }) {
   // fail the same way. The dialog still offers it by hand.
   if (rec.failed) return { go: false, why: "the last resume failed" };
   if (sameShell(rec, { pid, since })) return { go: false, why: "same shell as before" };
+  // The engine found the folder missing or not the person's (vetRecord).
+  if (rec.cwdRefused) return { go: false, why: "its folder is missing or not yours", hint: true };
+  const missing = unmet(rec, env);
+  if (missing.length) return { go: false, why: `it was started with ${missing.join(", ")}`, hint: true };
   return { go: true, why: "the terminal's program was replaced" };
 }
 
