@@ -89,6 +89,7 @@ Cursor are built from their docs and not tested end to end yet.
 | `mods/revive/lib/core.js` | Agents (the `AGENTS` table), flags, hook payloads, labels, states and the resume script: plain functions shared by the dialog and the engine |
 | `mods/revive/lib/sessions.js` | Engine only: finding a running agent's session from the files it writes, for one nobody recorded |
 | `mods/revive/revive.mjs` | The engine, run with the person's Node: hooks, the shell check, list, resume, install |
+| `mods/revive/lib/extension.js` | Extensions only: what pi's and omp's extensions share (running `revive.mjs hook` one at a time, the SIGTERM/SIGHUP listener) |
 | `mods/revive/pi/revive.ts` | pi's extension: runs `revive.mjs hook` at pi's session start and end, with Claude Code's payload |
 | `mods/revive/omp/revive.ts` | omp's extension: the same for omp, which has its own extension folder and events |
 | `mods/revive/package.json` | Marks the folder as ES modules for Node |
@@ -201,10 +202,15 @@ reboot with either agent.
   `/resume`, `/fork`, reload), with pi's command line as `argv` (pi renames its process
   `pi`). At `session_shutdown` it sends `SessionEnd` with reason `prompt_input_exit` only
   for `quit` without a SIGTERM or SIGHUP; a signal, or a session replaced in the same
-  process, sends nothing, which keeps the record like Claude Code's `other`. It finds the
-  engine as `../revive.mjs` from its own real path, so it must be linked, not copied
-  away from the mod.
-- omp's extension (checked against omp 18.16.0) works like pi's, with two differences.
+  process, sends nothing, which keeps the record like Claude Code's `other`. It imports
+  `../lib/extension.js` from its own real path, which finds the engine as
+  `../revive.mjs` from there, so the extension must be linked, not copied away from the
+  mod. It listens for SIGTERM and SIGHUP from its first `session_start` to the
+  `session_shutdown`, once however often a session starts. The hook gives up after 10
+  seconds, and a hook that fails or can't start `node` is dropped without holding up the
+  next one.
+- omp's extension (checked against omp 18.16.0) works like pi's, through the same
+  `lib/extension.js`, and runs `revive.mjs hook --agent omp`. It differs in two ways.
   omp's `session_shutdown` carries no reason: the extension listens for SIGTERM and
   SIGHUP itself and sends `SessionEnd` with reason `prompt_input_exit` only when neither
   came first (a person's `/exit`, Ctrl+C or Ctrl+D); a reboot, a core restart or a

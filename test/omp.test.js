@@ -14,10 +14,12 @@ const ID = "0190f3a2-7c41-7b5e-9d2a-3e6f1c8b4a17";
 const FILE = `/h/.omp/agent/sessions/-w/2026-01-01T00-00-00-000Z_${ID}.jsonl`;
 let copies = 0;
 
-/** The extension in a mod folder of its own, loaded into a fake omp. */
+/** The extension and its helper in a mod folder of its own, loaded into a fake omp. */
 async function load(t, env = { HC_TERMINAL_ID: "t1" }) {
   const mod = mkdtempSync(join(tmpdir(), "revive-omp-"));
   mkdirSync(join(mod, "omp"));
+  mkdirSync(join(mod, "lib"));
+  copyFileSync("mods/revive/lib/extension.js", join(mod, "lib", "extension.js"));
   writeFileSync(join(mod, "package.json"), '{ "type": "module" }\n');
   writeFileSync(join(mod, "revive.mjs"), `import fs from "node:fs";
 let text = ""; for await (const c of process.stdin) text += c;
@@ -30,7 +32,7 @@ fs.appendFileSync(${JSON.stringify(join(mod, "log"))}, JSON.stringify([process.a
   process.env.HC_TERMINAL_ID = env.HC_TERMINAL_ID ?? "";
   try {
     const ext = (await import(pathToFileURL(file))).default;
-    ext({ on: (name, fn) => { handlers[name] = fn; } });
+    await ext({ on: (name, fn) => { handlers[name] = fn; } });
   } catch (err) {
     t.skip(`this Node can't load TypeScript: ${err.message}`);
     return null;

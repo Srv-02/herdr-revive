@@ -7,14 +7,19 @@ import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, exis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { createRequire, syncBuiltinESMExports } from "node:module";
+
+const childProcess = createRequire(import.meta.url)("node:child_process");
 
 const ID = "01a19bbb-ced1-7004-b681-6ccd26c5c927";
 let copies = 0;
 
-/** The extension in a mod folder of its own, loaded into a fake pi. */
+/** The extension and its helper in a mod folder of its own, loaded into a fake pi. */
 async function load(t, env = { HC_TERMINAL_ID: "t1" }) {
   const mod = mkdtempSync(join(tmpdir(), "revive-pi-"));
   mkdirSync(join(mod, "pi"));
+  mkdirSync(join(mod, "lib"));
+  copyFileSync("mods/revive/lib/extension.js", join(mod, "lib", "extension.js"));
   writeFileSync(join(mod, "package.json"), '{ "type": "module" }\n');
   // The fake engine: one line per hook.
   writeFileSync(join(mod, "revive.mjs"), `import fs from "node:fs";
@@ -29,7 +34,7 @@ fs.appendFileSync(${JSON.stringify(join(mod, "log"))}, JSON.stringify([process.a
   process.env.HC_TERMINAL_ID = env.HC_TERMINAL_ID ?? "";
   try {
     const ext = (await import(pathToFileURL(file))).default;
-    ext({ on: (name, fn) => { handlers[name] = fn; } });
+    await ext({ on: (name, fn) => { handlers[name] = fn; } });
   } catch (err) {
     t.skip(`this Node can't load TypeScript: ${err.message}`);
     return null;
@@ -90,4 +95,38 @@ test("pi outside a herdr terminal, in print or json mode, or without a session f
   pi.handlers.session_start({ reason: "startup" }, ctx("tui", null));
   await pi.handlers.session_shutdown({ reason: "quit" }, ctx("tui", null));
   assert.deepEqual(pi.log(), []);
+});
+
+test("pi listens for SIGTERM and SIGHUP once, however often a session starts", async (t) => {
+  const pi = await load(t);
+  if (!pi) return;
+  const count = () => ["SIGTERM", "SIGHUP"].map((s) => process.listenerCount(s));
+  const before = count();
+  // /new, /resume, /fork and reload start a session in the same process.
+  for (const reason of ["startup", "new", "resume"]) pi.handlers.session_start({ reason }, ctx());
+  assert.deepEqual(count(), before.map((n) => n + 1));
+  await pi.handlers.session_shutdown({ reason: "new" }, ctx());
+  assert.deepEqual(count(), before);
+  await pi.handlers.session_shutdown({ reason: "quit" }, ctx());
+  assert.deepEqual(count(), before, "a second end takes nothing more away");
+});
+
+test("pi goes on when node can't be started", async (t) => {
+  const pi = await load(t);
+  if (!pi) return;
+  const spawn = childProcess.spawn;
+  childProcess.spawn = () => { throw new Error("spawn EAGAIN"); };
+  syncBuiltinESMExports();
+  try {
+    pi.handlers.session_start({ reason: "startup" }, ctx());
+    await pi.handlers.session_shutdown({ reason: "new" }, ctx());
+  } finally {
+    childProcess.spawn = spawn;
+    syncBuiltinESMExports();
+  }
+  assert.deepEqual(pi.log(), []);
+  // The queue is not broken: the next hook still reaches the engine.
+  pi.handlers.session_start({ reason: "resume" }, ctx());
+  await pi.handlers.session_shutdown({ reason: "quit" }, ctx());
+  assert.deepEqual(pi.log().map(([, p]) => p.hook_event_name), ["SessionStart", "SessionEnd"]);
 });
